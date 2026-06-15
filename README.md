@@ -10,6 +10,9 @@ It is built for writers who learned to compose on WordStar and never quite found
 anything that felt the same — but who also want arrow keys, a built-in file
 browser, find-and-replace, and a live formatting preview when they want them.
 
+<img width="1007" height="472" alt="image" src="https://github.com/user-attachments/assets/37d2ccda-d788-4386-ab31-91c7aaf4a12e" />
+
+
 ---
 
 ## Installing and compiling
