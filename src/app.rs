@@ -1,0 +1,799 @@
+//! Application state and the top-level input dispatcher.
+//!
+//! [`App`] is the single source of truth: the text widget, the open file, the
+//! current [`Mode`], the chord state, and transient status. All mutation flows
+//! through here or through [`commands::execute`](crate::commands::execute).
+
+use std::fs;
+use std::path::PathBuf;
+
+use anyhow::Result;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use ratatui::layout::Alignment;
+use ratatui_textarea::{CursorMove, Input, Key, TextArea};
+
+use crate::attributes::RunAttributes;
+use crate::commands;
+use crate::keymap::{self, ChordState, Resolution};
+use crate::theme;
+
+/// Which screen / interaction the app is currently in. Drives both input
+/// routing and rendering so the two never drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Normal editing.
+    #[default]
+    Editor,
+    /// A pull-down menu is open.
+    Menu,
+    /// A single-line prompt overlay (find / replace / save-as) is open.
+    Prompt,
+    /// The file browser is open.
+    Browser,
+    /// The read-only formatted preview is open.
+    Preview,
+    /// The help overlay is open.
+    Help,
+}
+
+/// Which kind of single-line prompt is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptKind {
+    #[default]
+    Find,
+    Replace,
+    SaveAs,
+    Font,
+    FontSize,
+}
+
+/// Paragraph alignment choice (Justify is tracked even though the widget
+/// can only render Left/Center/Right).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignChoice {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+/// State backing the [`Mode::Prompt`] overlay.
+#[derive(Debug, Clone, Default)]
+pub struct PromptState {
+    pub kind: PromptKind,
+    pub label: String,
+    pub input: String,
+    /// For replace: the search term captured in the first step.
+    pub pending_find: Option<String>,
+}
+
+/// The whole application.
+pub struct App {
+    /// The editable text buffer (raw markdown).
+    pub textarea: TextArea<'static>,
+    /// Path of the open document, if any.
+    pub path: Option<PathBuf>,
+    /// Whether the buffer has unsaved changes.
+    pub modified: bool,
+    /// Set to true to break the main loop.
+    pub should_quit: bool,
+    /// Current interaction mode.
+    pub mode: Mode,
+    /// Insert (true) vs overtype (false), shown on the status line.
+    pub insert_mode: bool,
+    /// Pending WordStar chord prefix, if any.
+    pub chord: ChordState,
+    /// Transient message shown on the status line (cleared on next key).
+    pub status_msg: Option<String>,
+    /// True once the user has been warned about discarding unsaved changes.
+    quit_confirmed: bool,
+    /// Active prompt overlay state (meaningful when `mode == Prompt`).
+    pub prompt: PromptState,
+    /// Active file browser (present when `mode == Browser`).
+    pub browser: Option<crate::browser::Browser>,
+    /// Scroll offset for the preview overlay.
+    pub preview_scroll: u16,
+    /// Scroll offset for the help overlay.
+    pub help_scroll: u16,
+    /// Open pull-down menu navigation state (used when `mode == Menu`).
+    pub menu: crate::menu::MenuState,
+    /// Current paragraph alignment choice.
+    pub align: AlignChoice,
+}
+
+impl App {
+    /// Build the app, optionally loading a file from `path`.
+    pub fn new(path: Option<String>) -> Result<Self> {
+        let path = path.map(PathBuf::from);
+        let textarea = match &path {
+            Some(p) if p.is_file() => {
+                let content = fs::read_to_string(p)?;
+                let lines: Vec<String> = if content.is_empty() {
+                    vec![String::new()]
+                } else {
+                    content.lines().map(str::to_owned).collect()
+                };
+                TextArea::new(lines)
+            }
+            _ => TextArea::default(),
+        };
+
+        let mut app = Self {
+            textarea,
+            path,
+            modified: false,
+            should_quit: false,
+            mode: Mode::default(),
+            insert_mode: true,
+            chord: ChordState::default(),
+            status_msg: None,
+            quit_confirmed: false,
+            prompt: PromptState::default(),
+            browser: None,
+            preview_scroll: 0,
+            help_scroll: 0,
+            menu: crate::menu::MenuState::default(),
+            align: AlignChoice::Left,
+        };
+        app.apply_editor_theme();
+        Ok(app)
+    }
+
+    /// Apply the WordStar look to the text widget.
+    fn apply_editor_theme(&mut self) {
+        self.textarea.set_style(theme::canvas());
+        // WordStar does not underline the current line; keep it plain.
+        self.textarea.set_cursor_line_style(theme::canvas());
+        self.textarea.set_selection_style(theme::selection());
+        self.textarea.set_search_style(theme::search());
+    }
+
+    /// Document name for the title bar.
+    pub fn file_name(&self) -> String {
+        match &self.path {
+            Some(p) => p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_uppercase())
+                .unwrap_or_else(|| "UNTITLED".into()),
+            None => "UNTITLED".into(),
+        }
+    }
+
+    /// Route a key press according to the current mode.
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        // Ignore key-release events (Windows / kitty protocol report them).
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        match self.mode {
+            Mode::Editor => self.handle_editor_key(key),
+            Mode::Menu => self.handle_menu_key(key),
+            Mode::Prompt => self.handle_prompt_key(key),
+            Mode::Browser => self.handle_browser_key(key),
+            Mode::Preview => self.handle_overlay_key(key, OverlayKind::Preview),
+            Mode::Help => self.handle_overlay_key(key, OverlayKind::Help),
+        }
+    }
+
+    fn handle_editor_key(&mut self, key: KeyEvent) {
+        // Any key other than a repeated quit clears the quit warning and status.
+        self.status_msg = None;
+
+        match keymap::resolve(&mut self.chord, key) {
+            Resolution::Command(cmd) => {
+                self.quit_confirmed = self.quit_confirmed && cmd == crate::commands::Command::Quit;
+                commands::execute(self, cmd);
+            }
+            Resolution::Pending(hint) => {
+                self.status_msg = Some(hint.to_string());
+            }
+            Resolution::Beep => {
+                self.set_status("Unrecognized command.");
+                ring_bell();
+            }
+            Resolution::PassThrough => {
+                self.quit_confirmed = false;
+                self.pass_to_editor(key);
+            }
+        }
+    }
+
+    /// Hand a key to the text widget, honoring overtype mode for printable input.
+    fn pass_to_editor(&mut self, key: KeyEvent) {
+        let input: Input = key.into();
+
+        // Overtype: replace the character under the cursor instead of inserting,
+        // unless we are at end-of-line (where overtype behaves like insert).
+        if !self.insert_mode && matches!(input.key, Key::Char(_)) && !self.at_line_end() {
+            self.textarea.delete_next_char();
+        }
+
+        if self.textarea.input(input) {
+            self.modified = true;
+        }
+    }
+
+    fn at_line_end(&self) -> bool {
+        let cursor = self.textarea.cursor();
+        let line_len = self
+            .textarea
+            .lines()
+            .get(cursor.0)
+            .map(|l| l.chars().count())
+            .unwrap_or(0);
+        cursor.1 >= line_len
+    }
+
+    // ------------------------------------------------------------------
+    // Pull-down menus
+    // ------------------------------------------------------------------
+
+    /// Open the menu bar (F9).
+    pub fn open_menu(&mut self) {
+        self.mode = Mode::Menu;
+        self.menu = crate::menu::MenuState::default();
+        self.status_msg = None;
+    }
+
+    fn handle_menu_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::F(9) => self.mode = Mode::Editor,
+            KeyCode::Left => self.menu.prev_menu(),
+            KeyCode::Right => self.menu.next_menu(),
+            KeyCode::Up => self.menu.prev_item(),
+            KeyCode::Down => self.menu.next_item(),
+            KeyCode::Enter => {
+                if let Some(cmd) = self.menu.selected_command() {
+                    self.mode = Mode::Editor;
+                    commands::execute(self, cmd);
+                }
+            }
+            KeyCode::Char(c) => {
+                // A letter jumps to the matching menu title.
+                self.menu.jump_to_title(c);
+            }
+            _ => {}
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Prompt overlay (find / replace / save-as)
+    // ------------------------------------------------------------------
+
+    /// Open the find prompt.
+    pub fn start_find(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::Find,
+            label: "Find:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Open the find-and-replace prompt (two steps).
+    pub fn start_replace(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::Replace,
+            label: "Find:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Open the save-as prompt.
+    pub fn start_save_as(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::SaveAs,
+            label: "Save as:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Open the font-name prompt.
+    pub fn start_font_prompt(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::Font,
+            label: "Font name:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Open the font-size prompt.
+    pub fn start_size_prompt(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::FontSize,
+            label: "Font size:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Editor;
+                self.set_status("Cancelled.");
+            }
+            KeyCode::Enter => self.confirm_prompt(),
+            KeyCode::Backspace => {
+                self.prompt.input.pop();
+            }
+            KeyCode::Char(c) => self.prompt.input.push(c),
+            _ => {}
+        }
+    }
+
+    fn confirm_prompt(&mut self) {
+        match self.prompt.kind {
+            PromptKind::Find => {
+                let query = self.prompt.input.clone();
+                self.mode = Mode::Editor;
+                self.run_search(&query);
+            }
+            PromptKind::SaveAs => {
+                let name = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                if name.is_empty() {
+                    self.set_status("Save cancelled (no name).");
+                } else {
+                    self.path = Some(PathBuf::from(name));
+                    self.save();
+                }
+            }
+            PromptKind::Font => {
+                let name = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                if name.is_empty() {
+                    self.set_status("Font unchanged.");
+                } else {
+                    let close = format!("]{{font=\"{name}\"}}");
+                    self.apply_format("[", &close, &format!("Font: {name}"));
+                }
+            }
+            PromptKind::FontSize => {
+                let raw = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                match raw.parse::<u32>() {
+                    Ok(n) => {
+                        let close = format!("]{{size={n}}}");
+                        self.apply_format("[", &close, &format!("Size: {n}"));
+                    }
+                    Err(_) => self.set_status("Size must be a number."),
+                }
+            }
+            PromptKind::Replace => {
+                if self.prompt.pending_find.is_none() {
+                    // First step done: capture the search term, ask for replacement.
+                    let find = self.prompt.input.clone();
+                    if find.is_empty() {
+                        self.mode = Mode::Editor;
+                        self.set_status("Replace cancelled.");
+                        return;
+                    }
+                    self.prompt.pending_find = Some(find);
+                    self.prompt.label = "Replace with:".into();
+                    self.prompt.input.clear();
+                } else {
+                    let find = self.prompt.pending_find.take().unwrap();
+                    let with = self.prompt.input.clone();
+                    self.mode = Mode::Editor;
+                    self.replace_all(&find, &with);
+                }
+            }
+        }
+    }
+
+    /// Set the search pattern (literal) and jump to the first match.
+    fn run_search(&mut self, query: &str) {
+        if query.is_empty() {
+            let _ = self.textarea.set_search_pattern("");
+            self.set_status("Search cleared.");
+            return;
+        }
+        let pattern = regex_escape(query);
+        match self.textarea.set_search_pattern(&pattern) {
+            Ok(()) => {
+                if self.textarea.search_forward(false) {
+                    self.set_status(format!("Found \"{query}\". ^L finds next."));
+                } else {
+                    self.set_status(format!("\"{query}\" not found."));
+                }
+            }
+            Err(e) => self.set_status(format!("Bad search: {e}")),
+        }
+    }
+
+    /// Repeat the most recent search forward.
+    pub fn find_next(&mut self) {
+        if self.textarea.search_pattern().is_none() {
+            self.set_status("No active search. Use ^QF to find.");
+            return;
+        }
+        if !self.textarea.search_forward(false) {
+            self.set_status("No more matches.");
+        }
+    }
+
+    /// Replace every occurrence of `find` with `with`, rebuilding the buffer.
+    ///
+    /// Note: this resets undo history (acceptable for the MVP).
+    fn replace_all(&mut self, find: &str, with: &str) {
+        let text = self.textarea.lines().join("\n");
+        let count = text.matches(find).count();
+        if count == 0 {
+            self.set_status(format!("\"{find}\" not found."));
+            return;
+        }
+        let replaced = text.replace(find, with);
+        let lines: Vec<String> = if replaced.is_empty() {
+            vec![String::new()]
+        } else {
+            replaced.split('\n').map(str::to_owned).collect()
+        };
+        self.textarea = TextArea::new(lines);
+        self.apply_editor_theme();
+        self.modified = true;
+        self.set_status(format!("Replaced {count} occurrence(s)."));
+    }
+
+    // ------------------------------------------------------------------
+    // File browser
+    // ------------------------------------------------------------------
+
+    /// Open the file browser at the document's directory (or the cwd / home).
+    pub fn open_browser(&mut self) {
+        let start = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent().map(PathBuf::from))
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        match crate::browser::Browser::new(start) {
+            Ok(b) => {
+                self.browser = Some(b);
+                self.mode = Mode::Browser;
+            }
+            Err(e) => self.set_status(format!("Cannot open browser: {e}")),
+        }
+    }
+
+    fn handle_browser_key(&mut self, key: KeyEvent) {
+        let Some(browser) = self.browser.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Editor;
+                self.browser = None;
+            }
+            KeyCode::Up => browser.select_prev(),
+            KeyCode::Down => browser.select_next(),
+            KeyCode::Left | KeyCode::PageUp => browser.select_up_column(),
+            KeyCode::Right | KeyCode::PageDown => browser.select_down_column(),
+            KeyCode::Enter => match browser.activate() {
+                crate::browser::Activation::Stay => {}
+                crate::browser::Activation::Open(path) => {
+                    self.browser = None;
+                    self.mode = Mode::Editor;
+                    self.load_file(path);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Load a file into the editor, replacing the current buffer.
+    fn load_file(&mut self, path: PathBuf) {
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                let lines: Vec<String> = if content.is_empty() {
+                    vec![String::new()]
+                } else {
+                    content.lines().map(str::to_owned).collect()
+                };
+                self.textarea = TextArea::new(lines);
+                self.apply_editor_theme();
+                self.path = Some(path.clone());
+                self.modified = false;
+                self.set_status(format!("Opened {}", path.display()));
+            }
+            Err(e) => self.set_status(format!("Open failed: {e}")),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Preview / Help overlays
+    // ------------------------------------------------------------------
+
+    /// Toggle the read-only markdown preview.
+    pub fn toggle_preview(&mut self) {
+        self.mode = if self.mode == Mode::Preview {
+            Mode::Editor
+        } else {
+            self.preview_scroll = 0;
+            Mode::Preview
+        };
+    }
+
+    /// Toggle the help overlay.
+    pub fn toggle_help(&mut self) {
+        self.mode = if self.mode == Mode::Help {
+            Mode::Editor
+        } else {
+            self.help_scroll = 0;
+            Mode::Help
+        };
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyEvent, kind: OverlayKind) {
+        let scroll = match kind {
+            OverlayKind::Preview => &mut self.preview_scroll,
+            OverlayKind::Help => &mut self.help_scroll,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::F(1) | KeyCode::F(5) | KeyCode::Char('q') => {
+                self.mode = Mode::Editor
+            }
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll = scroll.saturating_add(1),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+            KeyCode::Home => *scroll = 0,
+            _ => {}
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Block operations (mapped onto the text widget's selection + yank buffer)
+    // ------------------------------------------------------------------
+
+    /// `^KB` — mark the start of a block (begin selecting).
+    pub fn block_begin(&mut self) {
+        self.textarea.cancel_selection();
+        self.textarea.start_selection();
+        self.set_status("Block start marked — move the cursor, then ^KC/^KV/^KY.");
+    }
+
+    /// `^KK` — mark the end of a block and copy it to the block buffer.
+    pub fn block_end(&mut self) {
+        if self.textarea.is_selecting() {
+            self.textarea.copy();
+            self.set_status("Block marked and copied to buffer (^KV to paste).");
+        } else {
+            self.set_status("No block. Mark the start with ^KB first.");
+        }
+    }
+
+    /// `^KC` — copy the marked block to the block buffer.
+    pub fn block_copy(&mut self) {
+        if self.textarea.is_selecting() {
+            self.textarea.copy();
+            self.set_status("Block copied to buffer (^KV to paste).");
+        } else {
+            self.set_status("No block selected. Use ^KB to begin.");
+        }
+    }
+
+    /// `^KV` — insert the block buffer at the cursor (copy/move destination).
+    pub fn block_move(&mut self) {
+        if self.textarea.yank_text().is_empty() {
+            self.set_status("Block buffer is empty. Copy a block first (^KC).");
+            return;
+        }
+        self.edit(|t| t.paste());
+        self.set_status("Block pasted at cursor.");
+    }
+
+    /// `^KY` — delete the marked block (also captured to the buffer).
+    pub fn block_delete(&mut self) {
+        if self.textarea.is_selecting() {
+            self.edit(|t| t.cut());
+            self.set_status("Block deleted.");
+        } else {
+            self.set_status("No block selected. Use ^KB to begin.");
+        }
+    }
+
+    /// `^KH` — hide/clear the block markers (cancel selection).
+    pub fn block_hide(&mut self) {
+        self.textarea.cancel_selection();
+        self.set_status("Block markers hidden.");
+    }
+
+    /// Run an editing closure, marking the buffer modified if it changed.
+    pub fn edit<F: FnOnce(&mut TextArea<'static>) -> bool>(&mut self, f: F) {
+        if f(&mut self.textarea) {
+            self.modified = true;
+        }
+    }
+
+    /// Toggle insert / overtype.
+    pub fn toggle_insert(&mut self) {
+        self.insert_mode = !self.insert_mode;
+    }
+
+    // ------------------------------------------------------------------
+    // Inline formatting & paragraph alignment
+    // ------------------------------------------------------------------
+
+    /// Wrap the current selection (or, with none, the cursor) in `open`/`close`
+    /// markdown markers. With no selection the cursor is left between the markers
+    /// so the next typed text is formatted.
+    pub fn apply_format(&mut self, open: &str, close: &str, label: &str) {
+        if self.textarea.is_selecting() {
+            self.textarea.cut();
+            let inner = self.textarea.yank_text();
+            self.textarea.insert_str(format!("{open}{inner}{close}"));
+            self.set_status(format!("{label} applied to selection."));
+        } else {
+            self.textarea.insert_str(format!("{open}{close}"));
+            for _ in 0..close.chars().count() {
+                self.textarea.move_cursor(CursorMove::Back);
+            }
+            self.set_status(format!("{label} on — type, then move past the marker."));
+        }
+        self.modified = true;
+    }
+
+    /// Strip inline formatting markers from the selected text.
+    pub fn clear_formatting(&mut self) {
+        if self.textarea.is_selecting() {
+            self.textarea.cut();
+            let inner = self.textarea.yank_text();
+            let cleaned = crate::attributes::strip_inline_markers(&inner);
+            self.textarea.insert_str(cleaned);
+            self.modified = true;
+            self.set_status("Formatting cleared from selection.");
+        } else {
+            self.set_status("Select text first, then clear formatting.");
+        }
+    }
+
+    /// Set the paragraph alignment (also updates the widget where it can).
+    pub fn set_align(&mut self, choice: AlignChoice) {
+        self.align = choice;
+        let (a, label) = match choice {
+            AlignChoice::Left => (Alignment::Left, "Left"),
+            AlignChoice::Center => (Alignment::Center, "Centered"),
+            AlignChoice::Right => (Alignment::Right, "Right"),
+            // The widget has no justify; render as left but remember the choice.
+            AlignChoice::Justify => (Alignment::Left, "Justified"),
+        };
+        self.textarea.set_alignment(a);
+        self.set_status(format!("Alignment: {label}"));
+    }
+
+    /// Start a new, empty document (no path).
+    pub fn new_document(&mut self) {
+        self.textarea = TextArea::default();
+        self.apply_editor_theme();
+        self.textarea.set_alignment(Alignment::Left);
+        self.path = None;
+        self.modified = false;
+        self.align = AlignChoice::Left;
+        self.set_status("New document.");
+    }
+
+    /// Attributes active at the cursor (drives the style bar B/I/U + font/size).
+    pub fn attributes_at_cursor(&self) -> RunAttributes {
+        let cursor = self.textarea.cursor();
+        let line = self
+            .textarea
+            .lines()
+            .get(cursor.0)
+            .cloned()
+            .unwrap_or_default();
+        let attrs = crate::attributes::line_attributes(&line);
+        attrs.get(cursor.1).cloned().unwrap_or_default()
+    }
+
+    /// Document-default font and size (from YAML frontmatter, with fallbacks).
+    pub fn document_defaults(&self) -> (String, u32) {
+        let (font, size) = crate::attributes::document_defaults(self.textarea.lines());
+        (font.unwrap_or_else(|| "Default".into()), size.unwrap_or(12))
+    }
+
+    /// Save the buffer to its path as markdown.
+    pub fn save(&mut self) {
+        let Some(path) = self.path.clone() else {
+            self.set_status("No file name yet — Save As arrives in Phase 2.");
+            return;
+        };
+        let mut content = self.textarea.lines().join("\n");
+        content.push('\n');
+        match fs::write(&path, content) {
+            Ok(()) => {
+                self.modified = false;
+                self.set_status(format!("Saved {}", path.display()));
+            }
+            Err(e) => self.set_status(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Quit, warning once if there are unsaved changes.
+    pub fn request_quit(&mut self) {
+        if self.modified && !self.quit_confirmed {
+            self.quit_confirmed = true;
+            self.set_status("Unsaved changes! ^KX to save & exit, or press quit again to discard.");
+            return;
+        }
+        self.should_quit = true;
+    }
+
+    /// Insert pasted text.
+    pub fn handle_paste(&mut self, text: String) {
+        if self.textarea.insert_str(text) {
+            self.modified = true;
+        }
+    }
+
+    /// Set the transient status-line message.
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some(msg.into());
+    }
+
+    /// Cursor metrics for the status line, in WordStar units.
+    pub fn cursor_metrics(&self) -> CursorMetrics {
+        let cursor = self.textarea.cursor();
+        let line = cursor.0; // 0-based row
+        let col = cursor.1; // 0-based column
+        CursorMetrics {
+            line: line + 1,
+            column: col + 1,
+            // Page: ~54 text lines per page (9" at 6 lines/inch).
+            page: line / 54 + 1,
+            // Vertical position: 0.5" top margin + 6 lines/inch.
+            vertical_inches: 0.5 + line as f32 / 6.0,
+            // Horizontal position: 10 chars/inch (pica).
+            horizontal_inches: col as f32 / 10.0,
+        }
+    }
+}
+
+/// Derived cursor position for the status line.
+pub struct CursorMetrics {
+    pub line: usize,
+    pub column: usize,
+    pub page: usize,
+    pub vertical_inches: f32,
+    pub horizontal_inches: f32,
+}
+
+/// Which scrollable overlay a key event targets.
+#[derive(Clone, Copy)]
+enum OverlayKind {
+    Preview,
+    Help,
+}
+
+/// Escape regex metacharacters so a user's search term is matched literally
+/// (WordStar's find is literal by default).
+fn regex_escape(s: &str) -> String {
+    const SPECIAL: &[char] = &[
+        '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~',
+    ];
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if SPECIAL.contains(&c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn ring_bell() {
+    use std::io::Write;
+    let _ = std::io::stdout().write_all(b"\x07");
+}
