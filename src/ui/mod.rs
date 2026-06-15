@@ -39,6 +39,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.mode == Mode::Clean {
         clean_pane(frame, rows[4], app);
     } else {
+        // The text widget only styles cells it draws into, so paint the whole
+        // canvas WordStar-blue first; otherwise empty space shows the terminal's
+        // default background.
+        frame.render_widget(Block::default().style(theme::canvas()), rows[4]);
         frame.render_widget(&app.textarea, rows[4]);
     }
     status_bar(frame, rows[5], app);
@@ -649,3 +653,5 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App) {
         cols[1],
     );
 }
+
+
