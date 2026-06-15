@@ -28,22 +28,41 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
+    // Record geometry for mouse hit-testing.
+    app.editor_area.set(rows[4]);
+    app.menu_bar_area.set(rows[1]);
+
     title_bar(frame, rows[0], app);
     menu_bar(frame, rows[1], app);
     style_bar(frame, rows[2], app);
     ruler(frame, rows[3]);
-    frame.render_widget(&app.textarea, rows[4]);
+    if app.mode == Mode::Clean {
+        clean_pane(frame, rows[4], app);
+    } else {
+        frame.render_widget(&app.textarea, rows[4]);
+    }
     status_bar(frame, rows[5], app);
 
     // Overlays on top of the editor, per mode.
     match app.mode {
-        Mode::Editor => {}
+        Mode::Editor | Mode::Clean => {}
         Mode::Menu => menu_dropdown(frame, area, app),
         Mode::Prompt => prompt_overlay(frame, area, app),
         Mode::Browser => browser_overlay(frame, area, app),
         Mode::Preview => preview_overlay(frame, area, app),
         Mode::Help => help_overlay(frame, area, app),
     }
+}
+
+/// Render the editor region as read-only formatted text (the "hide markup"
+/// view toggled with `^OD`).
+fn clean_pane(frame: &mut Frame, area: Rect, app: &App) {
+    let lines = preview::render(&app.textarea.lines().join("\n"));
+    let para = Paragraph::new(lines)
+        .style(theme::canvas())
+        .wrap(Wrap { trim: false })
+        .scroll((app.preview_scroll, 0));
+    frame.render_widget(para, area);
 }
 
 /// A rectangle centered in `area` with the given width/height (clamped).
@@ -143,6 +162,7 @@ fn browser_overlay(frame: &mut Frame, area: Rect, app: &App) {
 
     // Multi-column listing.
     let list_area = header_rows[1];
+    app.browser_list_area.set(list_area);
     let rows = list_area.height.max(1) as usize;
     browser.col_height.set(rows);
     let col_width = 26u16;
@@ -218,7 +238,7 @@ const MENU_LEAD: u16 = 1;
 const MENU_GAP: u16 = 3;
 
 /// X offset of each menu title on the bar (Help is right-aligned).
-fn menu_anchors(width: u16) -> Vec<u16> {
+pub fn menu_anchors(width: u16) -> Vec<u16> {
     let mut xs = vec![0u16; menu::MENUS.len()];
     let mut x = MENU_LEAD;
     for (i, m) in menu::MENUS.iter().enumerate() {
@@ -302,6 +322,7 @@ fn menu_dropdown(frame: &mut Frame, area: Rect, app: &App) {
     }
     let y = 2u16; // just below the menu bar (title row 0, menu row 1)
     let rect = Rect::new(x, y, width, height).intersection(area);
+    app.dropdown_area.set(rect);
 
     frame.render_widget(Clear, rect);
     let block = Block::default()
@@ -546,6 +567,56 @@ mod tests {
         let screen = render_app(&app, 80, 8);
         assert!(screen.contains("Default"), "default font missing");
         assert!(screen.contains("12pt"), "default size missing");
+    }
+
+    #[test]
+    fn clean_view_hides_markup() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("a **bold** word");
+        app.toggle_markup();
+        assert_eq!(app.mode, Mode::Clean);
+        let screen = render_app(&app, 80, 10);
+        assert!(screen.contains("bold"), "text missing:\n{screen}");
+        assert!(!screen.contains("**bold**"), "markers not hidden");
+    }
+
+    fn rendered(app: &App, w: u16, h: u16) {
+        let mut term = ratatui::Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+    }
+
+    #[test]
+    fn mouse_click_positions_cursor() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("line one");
+        app.textarea.insert_newline();
+        app.textarea.insert_str("line two");
+        rendered(&app, 80, 24); // populate geometry + viewport
+        // Editor pane starts at row 4; click first line, column 3.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.textarea.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn mouse_click_on_menu_bar_opens_menu() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut app = App::new(None).unwrap();
+        rendered(&app, 80, 24);
+        // "Edit" sits at anchor 8 on an 80-wide bar.
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.mode, Mode::Menu);
+        assert_eq!(app.menu.menu, 1); // Edit
     }
 }
 

@@ -5,14 +5,15 @@
 //! writer uses day to day (headings, bold/italic, inline code, lists, block
 //! quotes, code blocks, rules). It is not a full CommonMark renderer.
 
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Render markdown source into styled lines.
 pub fn render(source: &str) -> Vec<Line<'static>> {
     let mut r = Renderer::default();
-    for event in Parser::new(source) {
+    let options = Options::ENABLE_STRIKETHROUGH;
+    for event in Parser::new_ext(source, options) {
         r.handle(event);
     }
     r.flush_line();
@@ -26,9 +27,10 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
 struct Renderer {
     lines: Vec<Line<'static>>,
     current: Vec<Span<'static>>,
-    /// Active inline modifiers (bold / italic depth).
+    /// Active inline modifiers (bold / italic / strikethrough depth).
     bold: u32,
     italic: u32,
+    strike: u32,
     /// Heading level currently open, if any.
     heading: Option<HeadingLevel>,
     /// Inside a fenced/indented code block.
@@ -71,6 +73,7 @@ impl Renderer {
             }
             Tag::Strong => self.bold += 1,
             Tag::Emphasis => self.italic += 1,
+            Tag::Strikethrough => self.strike += 1,
             Tag::CodeBlock(_) => {
                 self.flush_line();
                 self.in_code_block = true;
@@ -105,6 +108,7 @@ impl Renderer {
             }
             TagEnd::Strong => self.bold = self.bold.saturating_sub(1),
             TagEnd::Emphasis => self.italic = self.italic.saturating_sub(1),
+            TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::CodeBlock => {
                 self.flush_line();
                 self.in_code_block = false;
@@ -159,6 +163,9 @@ impl Renderer {
         }
         if self.italic > 0 {
             style = style.add_modifier(Modifier::ITALIC);
+        }
+        if self.strike > 0 {
+            style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.in_blockquote {
             style = style.fg(Color::Cyan).add_modifier(Modifier::ITALIC);

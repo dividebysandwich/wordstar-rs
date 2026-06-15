@@ -120,6 +120,7 @@ here, and the function keys are added for convenience.
 | `^S` / `^D` | Left / Right one character      |
 | `^A` / `^F` | Left / Right one word           |
 | `^R` / `^C` | Page up / Page down             |
+| `^W` / `^Z` | Scroll the view up / down one line |
 | `^Q` `^S` / `^Q` `^D` | Start / End of line   |
 | `^Q` `^R` / `^Q` `^C` | Start / End of document |
 | Arrows, Home, End, PgUp, PgDn | Modern equivalents |
@@ -129,10 +130,12 @@ here, and the function keys are added for convenience.
 | Keys  | Action                          |
 | ----- | ------------------------------- |
 | `^V`  | Toggle Insert / Overtype        |
+| `^N`  | Insert a line (cursor stays put) |
 | `^G`  | Delete the character at the cursor |
 | `^T`  | Delete the word                 |
 | `^Y`  | Delete the line                 |
 | `^Q` `^Y` | Delete to end of line       |
+| `^Q` `Del` | Delete to start of line    |
 | `^U`  | Undo                            |
 
 ### Blocks
@@ -167,6 +170,20 @@ and **Esc** cancels.
 | `^PB` | Bold (`**…**`)                  |
 | `^PY` | Italic (`*…*`)                  |
 | `^PS` | Underline (`[…]{.underline}`)   |
+| `^PX` | Strikeout (`~~…~~`)             |
+
+### On-screen format (`^O`)
+
+| Keys  | Action                          |
+| ----- | ------------------------------- |
+| `^OD` | Hide / show the formatting markup (a clean reading view) |
+| `^OC` | Center the paragraph            |
+| `^OL` / `^OR` | Align left / right       |
+| `^OJ` | Justify                         |
+
+`^OD` is the modern equivalent of WordStar's "display control characters"
+toggle: it hides the Markdown markers and shows the text as it will read. It is a
+read-only view — press `^OD` again (or `Esc`) to return to editing.
 
 ### Files and the program
 
@@ -213,6 +230,28 @@ columns.
 | ← / →           | Jump a column                   |
 | Enter           | Open a file, or enter a directory (`..` goes up) |
 | Esc             | Close the browser               |
+
+You can also click a file with the mouse, or double-click to open it.
+
+---
+
+## Using the mouse
+
+Like WordStar 7, the editor is fully usable with a mouse — handy alongside the
+keyboard, never required.
+
+| Action            | What it does                       |
+| ----------------- | ---------------------------------- |
+| Click             | Position the cursor                |
+| Click and drag    | Mark a block (select text)         |
+| Double-click      | Select the word under the pointer  |
+| Click a menu title | Open that menu; click another to switch |
+| Click a menu item | Run it                             |
+| Click outside a menu | Close it                        |
+| Scroll wheel      | Scroll the document, the file list, or any overlay |
+
+Marked text works with the block commands (`^KC` copy, `^KV` paste, `^KY`
+delete) just as a keyboard-marked block does.
 
 ---
 

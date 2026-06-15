@@ -195,6 +195,15 @@ impl MenuState {
         }
     }
 
+    /// Select a menu by index (e.g. from a mouse click), highlighting its first
+    /// selectable item.
+    pub fn select_menu(&mut self, idx: usize) {
+        if idx < MENUS.len() {
+            self.menu = idx;
+            self.item = self.first_selectable();
+        }
+    }
+
     /// Jump to the menu whose title starts with `letter` (case-insensitive).
     pub fn jump_to_title(&mut self, letter: char) -> bool {
         let letter = letter.to_ascii_lowercase();

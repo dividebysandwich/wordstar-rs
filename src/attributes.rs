@@ -112,9 +112,10 @@ pub fn strip_inline_markers(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '*' {
+        if chars[i] == '*' || chars[i] == '~' {
+            let marker = chars[i];
             i += 1;
-            if i < chars.len() && chars[i] == '*' {
+            if i < chars.len() && chars[i] == marker {
                 i += 1;
             }
             continue;

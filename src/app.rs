@@ -7,9 +7,14 @@
 use std::fs;
 use std::path::PathBuf;
 
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
-use ratatui::layout::Alignment;
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Alignment, Rect};
 use ratatui_textarea::{CursorMove, Input, Key, TextArea};
 
 use crate::attributes::RunAttributes;
@@ -24,6 +29,8 @@ pub enum Mode {
     /// Normal editing.
     #[default]
     Editor,
+    /// Read-only "hide markup" reading view (^OD).
+    Clean,
     /// A pull-down menu is open.
     Menu,
     /// A single-line prompt overlay (find / replace / save-as) is open.
@@ -100,6 +107,15 @@ pub struct App {
     pub menu: crate::menu::MenuState,
     /// Current paragraph alignment choice.
     pub align: AlignChoice,
+    /// True while a mouse drag is extending a selection in the editor.
+    mouse_selecting: bool,
+    /// Time + cell of the last mouse press, for double-click detection.
+    last_click: Option<(Instant, u16, u16)>,
+    /// Screen geometry recorded during the last render, for mouse hit-testing.
+    pub editor_area: Cell<Rect>,
+    pub menu_bar_area: Cell<Rect>,
+    pub dropdown_area: Cell<Rect>,
+    pub browser_list_area: Cell<Rect>,
 }
 
 impl App {
@@ -135,6 +151,12 @@ impl App {
             help_scroll: 0,
             menu: crate::menu::MenuState::default(),
             align: AlignChoice::Left,
+            mouse_selecting: false,
+            last_click: None,
+            editor_area: Cell::new(Rect::ZERO),
+            menu_bar_area: Cell::new(Rect::ZERO),
+            dropdown_area: Cell::new(Rect::ZERO),
+            browser_list_area: Cell::new(Rect::ZERO),
         };
         app.apply_editor_theme();
         Ok(app)
@@ -168,6 +190,7 @@ impl App {
         }
         match self.mode {
             Mode::Editor => self.handle_editor_key(key),
+            Mode::Clean => self.handle_clean_key(key),
             Mode::Menu => self.handle_menu_key(key),
             Mode::Prompt => self.handle_prompt_key(key),
             Mode::Browser => self.handle_browser_key(key),
@@ -536,6 +559,60 @@ impl App {
         };
     }
 
+    /// `^OD` — toggle the "hide formatting markup" reading view.
+    pub fn toggle_markup(&mut self) {
+        if self.mode == Mode::Clean {
+            self.mode = Mode::Editor;
+            self.set_status("Markup shown.");
+        } else {
+            self.preview_scroll = 0;
+            self.mode = Mode::Clean;
+            self.set_status("Markup hidden — Esc or ^OD to edit again.");
+        }
+    }
+
+    /// Input handling for the read-only "hide markup" view: scroll and toggle.
+    fn handle_clean_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Editor;
+                self.set_status("Markup shown.");
+                return;
+            }
+            KeyCode::Up => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.preview_scroll = self.preview_scroll.saturating_add(1);
+                return;
+            }
+            KeyCode::PageUp => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                return;
+            }
+            KeyCode::PageDown => {
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+                return;
+            }
+            KeyCode::Home => {
+                self.preview_scroll = 0;
+                return;
+            }
+            _ => {}
+        }
+        // Let chords/function keys through so ^OD, F5, F9, F10, F1 still work.
+        match keymap::resolve(&mut self.chord, key) {
+            Resolution::Command(crate::commands::Command::ToggleMarkup) => self.toggle_markup(),
+            Resolution::Command(crate::commands::Command::TogglePreview) => self.toggle_preview(),
+            Resolution::Command(crate::commands::Command::Help) => self.toggle_help(),
+            Resolution::Command(crate::commands::Command::Menu) => self.open_menu(),
+            Resolution::Command(crate::commands::Command::Quit) => self.request_quit(),
+            Resolution::Pending(hint) => self.set_status(hint),
+            _ => {}
+        }
+    }
+
     fn handle_overlay_key(&mut self, key: KeyEvent, kind: OverlayKind) {
         let scroll = match kind {
             OverlayKind::Preview => &mut self.preview_scroll,
@@ -674,6 +751,14 @@ impl App {
         self.set_status(format!("Alignment: {label}"));
     }
 
+    /// `^N` — insert a hard return at the cursor, leaving the cursor in place
+    /// (opens a new line below the current text position).
+    pub fn insert_line(&mut self) {
+        self.textarea.insert_newline();
+        self.textarea.move_cursor(CursorMove::Up);
+        self.modified = true;
+    }
+
     /// Start a new, empty document (no path).
     pub fn new_document(&mut self) {
         self.textarea = TextArea::default();
@@ -736,6 +821,236 @@ impl App {
         if self.textarea.insert_str(text) {
             self.modified = true;
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Mouse
+    // ------------------------------------------------------------------
+
+    /// Route a mouse event according to the current mode.
+    pub fn handle_mouse(&mut self, me: MouseEvent) {
+        match self.mode {
+            Mode::Editor => self.mouse_editor(me),
+            Mode::Clean => self.mouse_scroll(me, OverlayKind::Preview),
+            Mode::Menu => self.mouse_menu(me),
+            Mode::Browser => self.mouse_browser(me),
+            Mode::Preview => self.mouse_scroll(me, OverlayKind::Preview),
+            Mode::Help => self.mouse_scroll(me, OverlayKind::Help),
+            Mode::Prompt => {} // prompts are keyboard-only
+        }
+    }
+
+    fn mouse_editor(&mut self, me: MouseEvent) {
+        match me.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // A click on the menu bar opens that menu.
+                let mb = self.menu_bar_area.get();
+                if mb.height > 0 && me.row >= mb.y && me.row < mb.y + mb.height {
+                    if let Some(idx) = self.menu_index_at(me.column) {
+                        self.open_menu();
+                        self.menu.select_menu(idx);
+                    }
+                    return;
+                }
+                // Otherwise position the cursor / begin a selection.
+                if let Some((r, c)) = self.editor_doc_pos(me.column, me.row) {
+                    let double = self.register_click(me.column, me.row);
+                    self.textarea.cancel_selection();
+                    self.textarea.move_cursor(CursorMove::Jump(r, c));
+                    if double {
+                        self.select_word();
+                        self.mouse_selecting = false;
+                    } else {
+                        self.textarea.start_selection();
+                        self.mouse_selecting = true;
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.mouse_selecting
+                    && let Some((r, c)) = self.editor_doc_pos(me.column, me.row)
+                {
+                    self.textarea.move_cursor(CursorMove::Jump(r, c));
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.mouse_selecting {
+                    self.mouse_selecting = false;
+                    // A plain click (no drag) leaves a zero-width selection; drop it.
+                    match self.textarea.selection_range() {
+                        Some((a, b)) if a != b => {}
+                        _ => self.textarea.cancel_selection(),
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => self.textarea.scroll((1, 0)),
+            MouseEventKind::ScrollUp => self.textarea.scroll((-1, 0)),
+            _ => {}
+        }
+    }
+
+    fn mouse_menu(&mut self, me: MouseEvent) {
+        if me.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+        let mb = self.menu_bar_area.get();
+        if mb.height > 0 && me.row >= mb.y && me.row < mb.y + mb.height {
+            if let Some(idx) = self.menu_index_at(me.column) {
+                self.menu.select_menu(idx);
+            }
+            return;
+        }
+        let dd = self.dropdown_area.get();
+        let inside = dd.height > 1
+            && me.row > dd.y
+            && me.row < dd.y + dd.height - 1
+            && me.column > dd.x
+            && me.column < dd.x + dd.width - 1;
+        if inside {
+            let item = (me.row - dd.y - 1) as usize;
+            let count = crate::menu::MENUS[self.menu.menu].items.len();
+            if item < count {
+                self.menu.item = item;
+                if let Some(cmd) = self.menu.selected_command() {
+                    self.mode = Mode::Editor;
+                    commands::execute(self, cmd);
+                }
+            }
+            return;
+        }
+        // Clicked outside the menu: close it.
+        self.mode = Mode::Editor;
+    }
+
+    fn mouse_browser(&mut self, me: MouseEvent) {
+        match me.kind {
+            MouseEventKind::ScrollDown => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.select_next();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.select_prev();
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let la = self.browser_list_area.get();
+                if la.height == 0
+                    || me.row < la.y
+                    || me.row >= la.y + la.height
+                    || me.column < la.x
+                    || me.column >= la.x + la.width
+                {
+                    return;
+                }
+                let col_width = 26u16;
+                let (rows, num_cols, entries_len, cur_sel) = match self.browser.as_ref() {
+                    Some(b) => (
+                        b.col_height.get().max(1),
+                        (la.width / col_width).max(1) as usize,
+                        b.entries.len(),
+                        b.selected,
+                    ),
+                    None => {
+                        self.mode = Mode::Editor;
+                        return;
+                    }
+                };
+                let per_page = (rows * num_cols).max(1);
+                let page_start = (cur_sel / per_page) * per_page;
+                let col_idx = ((me.column - la.x) / col_width) as usize;
+                let row_idx = (me.row - la.y) as usize;
+                let idx = page_start + col_idx * rows + row_idx;
+                if idx >= entries_len {
+                    return;
+                }
+                let double = self.register_click(me.column, me.row) && cur_sel == idx;
+                if let Some(b) = self.browser.as_mut() {
+                    b.selected = idx;
+                }
+                if double {
+                    let activation = self.browser.as_mut().map(|b| b.activate());
+                    if let Some(crate::browser::Activation::Open(path)) = activation {
+                        self.browser = None;
+                        self.mode = Mode::Editor;
+                        self.load_file(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_scroll(&mut self, me: MouseEvent, kind: OverlayKind) {
+        let scroll = match kind {
+            OverlayKind::Preview => &mut self.preview_scroll,
+            OverlayKind::Help => &mut self.help_scroll,
+        };
+        match me.kind {
+            MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(1),
+            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    /// Map an editor-area click to a document `(row, col)`, using the cursor's
+    /// known screen position to recover the scroll offset.
+    fn editor_doc_pos(&self, mx: u16, my: u16) -> Option<(u16, u16)> {
+        let area = self.editor_area.get();
+        if area.width == 0
+            || my < area.y
+            || my >= area.y + area.height
+            || mx < area.x
+            || mx >= area.x + area.width
+        {
+            return None;
+        }
+        let wrow = (my - area.y) as usize;
+        let wcol = (mx - area.x) as usize;
+        let sc = self.textarea.screen_cursor();
+        let dc = self.textarea.cursor();
+        let top = dc.0.saturating_sub(sc.row);
+        let left = dc.1.saturating_sub(sc.col);
+        Some(((top + wrow) as u16, (left + wcol) as u16))
+    }
+
+    /// Select the word under the cursor (double-click).
+    fn select_word(&mut self) {
+        self.textarea.move_cursor(CursorMove::WordBack);
+        self.textarea.start_selection();
+        self.textarea.move_cursor(CursorMove::WordForward);
+    }
+
+    /// Which menu title (if any) sits under screen column `x`.
+    fn menu_index_at(&self, x: u16) -> Option<usize> {
+        let width = self.menu_bar_area.get().width;
+        let anchors = crate::ui::menu_anchors(width);
+        for (i, m) in crate::menu::MENUS.iter().enumerate() {
+            if i == crate::menu::HELP_INDEX {
+                if x >= anchors[i] {
+                    return Some(i);
+                }
+            } else {
+                let start = anchors[i];
+                let end = start + m.title.chars().count() as u16;
+                if x >= start && x < end {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Record a click and report whether it completes a double-click.
+    fn register_click(&mut self, x: u16, y: u16) -> bool {
+        let now = Instant::now();
+        let double = matches!(
+            self.last_click,
+            Some((t, px, py)) if px == x && py == y && now.duration_since(t) < Duration::from_millis(400)
+        );
+        self.last_click = if double { None } else { Some((now, x, y)) };
+        double
     }
 
     /// Set the transient status-line message.

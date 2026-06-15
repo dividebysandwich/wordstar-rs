@@ -109,11 +109,11 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         }
         'o' => {
             *state = ChordState::O;
-            Resolution::Pending("^O  Onscreen format (not yet implemented)")
+            Resolution::Pending("^O  Onscreen:  D)isplay markup  C)enter  J)ustify  L)eft  R)ight")
         }
         'p' => {
             *state = ChordState::P;
-            Resolution::Pending("^P  Format:  B)old  Y)italic  S)underline")
+            Resolution::Pending("^P  Format:  B)old  Y)italic  S)underline  X)strikeout")
         }
         // The movement "diamond".
         'e' => Resolution::Command(MoveUp),
@@ -124,10 +124,13 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'f' => Resolution::Command(WordRight),
         'r' => Resolution::Command(PageUp),
         'c' => Resolution::Command(PageDown),
+        'w' => Resolution::Command(ScrollUpLine),
+        'z' => Resolution::Command(ScrollDownLine),
         // Deletion.
         'g' => Resolution::Command(DeleteChar),
         't' => Resolution::Command(DeleteWord),
         'y' => Resolution::Command(DeleteLine),
+        'n' => Resolution::Command(InsertLine),
         // Misc.
         'v' => Resolution::Command(ToggleInsert),
         'u' => Resolution::Command(Undo),
@@ -158,6 +161,10 @@ fn resolve_k(key: KeyEvent) -> Resolution {
 
 fn resolve_q(key: KeyEvent) -> Resolution {
     use Command::*;
+    // ^Q Backspace / ^Q Del: delete to start of line.
+    if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
+        return Resolution::Command(DeleteToLineStart);
+    }
     match letter(&key) {
         Some('s') => Resolution::Command(LineStart),
         Some('d') => Resolution::Command(LineEnd),
@@ -172,10 +179,16 @@ fn resolve_q(key: KeyEvent) -> Resolution {
 }
 
 fn resolve_o(key: KeyEvent) -> Resolution {
-    if key.code == KeyCode::Esc {
-        return Resolution::PassThrough;
+    use Command::*;
+    match letter(&key) {
+        Some('d') => Resolution::Command(ToggleMarkup),
+        Some('c') => Resolution::Command(AlignCenter),
+        Some('j') => Resolution::Command(AlignJustify),
+        Some('l') => Resolution::Command(AlignLeft),
+        Some('r') => Resolution::Command(AlignRight),
+        _ if key.code == KeyCode::Esc => Resolution::PassThrough,
+        _ => Resolution::Beep,
     }
-    Resolution::Beep
 }
 
 fn resolve_p(key: KeyEvent) -> Resolution {
@@ -184,6 +197,7 @@ fn resolve_p(key: KeyEvent) -> Resolution {
         Some('b') => Resolution::Command(InsertBold),
         Some('y') => Resolution::Command(InsertItalic),
         Some('s') => Resolution::Command(InsertUnderline),
+        Some('x') => Resolution::Command(InsertStrike),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }

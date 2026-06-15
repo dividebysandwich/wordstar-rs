@@ -52,6 +52,9 @@ pub enum Command {
     PageDown,
     DocStart,
     DocEnd,
+    /// Scroll the view up/down one line without moving the cursor (^W / ^Z).
+    ScrollUpLine,
+    ScrollDownLine,
 
     // --- deletion ---
     DeleteChar,
@@ -59,6 +62,9 @@ pub enum Command {
     DeleteWord,
     DeleteLine,
     DeleteToLineEnd,
+    DeleteToLineStart,
+    /// Insert a hard return at the cursor, leaving the cursor in place (^N).
+    InsertLine,
 
     // --- editing modes ---
     ToggleInsert,
@@ -82,6 +88,10 @@ pub enum Command {
     InsertBold,
     InsertItalic,
     InsertUnderline,
+    /// Strikethrough (`~~…~~`), ^PX.
+    InsertStrike,
+    /// Toggle the "hide formatting markup" reading view (^OD).
+    ToggleMarkup,
     /// Prompt for a font name and apply it to the selection.
     FontPrompt,
     /// Prompt for a font size and apply it to the selection.
@@ -127,6 +137,8 @@ pub fn execute(app: &mut App, cmd: Command) {
         PageDown => app.textarea.scroll(Scrolling::PageDown),
         DocStart => app.textarea.move_cursor(CursorMove::Top),
         DocEnd => app.textarea.move_cursor(CursorMove::Bottom),
+        ScrollUpLine => app.textarea.scroll((-1, 0)),
+        ScrollDownLine => app.textarea.scroll((1, 0)),
 
         DeleteChar => app.edit(|t| t.delete_next_char()),
         DeleteCharBack => app.edit(|t| t.delete_char()),
@@ -136,6 +148,8 @@ pub fn execute(app: &mut App, cmd: Command) {
             t.delete_line_by_end() || t.delete_newline()
         }),
         DeleteToLineEnd => app.edit(|t| t.delete_line_by_end()),
+        DeleteToLineStart => app.edit(|t| t.delete_line_by_head()),
+        InsertLine => app.insert_line(),
 
         ToggleInsert => app.toggle_insert(),
         Undo => app.edit(|t| t.undo()),
@@ -155,6 +169,8 @@ pub fn execute(app: &mut App, cmd: Command) {
         InsertBold => app.apply_format("**", "**", "Bold"),
         InsertItalic => app.apply_format("*", "*", "Italic"),
         InsertUnderline => app.apply_format("[", "]{.underline}", "Underline"),
+        InsertStrike => app.apply_format("~~", "~~", "Strikethrough"),
+        ToggleMarkup => app.toggle_markup(),
         FontPrompt => app.start_font_prompt(),
         SizePrompt => app.start_size_prompt(),
         ClearFormat => app.clear_formatting(),

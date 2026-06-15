@@ -44,6 +44,7 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^S / ^D", "Left / Right a character");
     row(&mut out, "^A / ^F", "Left / Right a word");
     row(&mut out, "^R / ^C", "Page up / Page down");
+    row(&mut out, "^W / ^Z", "Scroll up / down one line");
     row(&mut out, "^QS / ^QD", "Start / End of line");
     row(&mut out, "^QR / ^QC", "Start / End of document");
     row(&mut out, "Arrows", "Modern cursor movement");
@@ -59,9 +60,12 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Editing");
     row(&mut out, "^V", "Toggle insert / overtype");
+    row(&mut out, "^N", "Insert a line, cursor stays");
     row(&mut out, "^G", "Delete character at cursor");
     row(&mut out, "^T", "Delete word");
     row(&mut out, "^Y", "Delete line");
+    row(&mut out, "^QY", "Delete to end of line");
+    row(&mut out, "^Q Del", "Delete to start of line");
     row(&mut out, "^U", "Undo");
 
     head(&mut out, "Find & replace");
@@ -81,6 +85,24 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^PB", "Bold  (**…**)");
     row(&mut out, "^PY", "Italic  (*…*)");
     row(&mut out, "^PS", "Underline  ([…]{.underline})");
+    row(&mut out, "^PX", "Strikeout  (~~…~~)");
+
+    head(&mut out, "Onscreen format (^O)");
+    row(&mut out, "^OD", "Hide / show formatting markup");
+    row(&mut out, "^OC", "Center the paragraph");
+    row(&mut out, "^OL / ^OR", "Align left / right");
+    row(&mut out, "^OJ", "Justify");
+
+    head(&mut out, "Mouse");
+    row(&mut out, "Click", "Position the cursor");
+    row(&mut out, "Drag", "Mark a block (select text)");
+    row(&mut out, "Double-click", "Select the word");
+    row(
+        &mut out,
+        "Click menu",
+        "Open a menu; click an item to run it",
+    );
+    row(&mut out, "Wheel", "Scroll the document");
 
     out.push(Line::default());
     out
