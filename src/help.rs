@@ -104,6 +104,15 @@ pub fn lines() -> Vec<Line<'static>> {
     );
     row(&mut out, "Wheel", "Scroll the document");
 
+    head(&mut out, "Markdown the preview renders (F5 / ^OD)");
+    row(&mut out, "# …", "Headings");
+    row(&mut out, "- / 1.", "Bullet / numbered lists");
+    row(&mut out, "- [x]", "Task lists");
+    row(&mut out, "| a | b |", "Tables (GitHub style)");
+    row(&mut out, "[t](url)", "Links and ![alt](url) images");
+    row(&mut out, "> …", "Block quotes");
+    row(&mut out, "```", "Fenced code blocks");
+
     out.push(Line::default());
     out
 }

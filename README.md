@@ -99,11 +99,33 @@ Your manuscript begins here…
 
 ### Seeing it formatted
 
-Press **F5** for a read-only **Preview**: headings, bold, italics, lists, and
-block quotes are rendered with the markers hidden, the way the finished page
-reads. Press **F5**, **Esc**, or **q** to return to editing. (A terminal cannot
-show real fonts or point sizes — those are recorded in the file and surfaced on
-the style bar, just as WordStar only previewed fonts in its own preview mode.)
+Press **F5** for a read-only **Preview**: the document is rendered with the
+markers hidden, the way the finished page reads. Press **F5**, **Esc**, or **q**
+to return to editing. (A terminal cannot show real fonts or point sizes — those
+are recorded in the file and surfaced on the style bar, just as WordStar only
+previewed fonts in its own preview mode.)
+
+### Markdown WordStar never had
+
+You can type any standard Markdown by hand and the preview (and the `^OD` clean
+view) will render it — features that have no WordStar equivalent:
+
+- **Headings** (`# … ######`) and **horizontal rules** (`---`)
+- **Ordered, bulleted, and nested lists**, plus **task lists** (`- [x] done`)
+- **Tables** (GitHub-style), laid out with aligned columns and box borders:
+
+  ```markdown
+  | Item   | Qty | Price |
+  | :---   | --: | :---: |
+  | Apples |   3 | 1.50  |
+  ```
+
+- **Links** `[text](url)` and **images** `![alt](url)` (the URL is shown dimmed)
+- **Inline code** `` `like this` `` and fenced **code blocks**
+- **Block quotes** (`> …`) and **strikethrough** (`~~…~~`)
+
+These are plain text in the editor — type them as you would in any Markdown file
+— and they simply come to life in the preview.
 
 ---
 
