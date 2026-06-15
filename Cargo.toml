@@ -2,6 +2,13 @@
 name = "wordstar-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A faithful DOS WordStar 7 clone for the terminal, written in Rust."
+authors = ["dividebysandwich <josef.jahn@gmail.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/dividebysandwich/wordstar-rs"
+readme = "README.md"
+keywords = ["wordstar", "editor", "tui", "markdown", "ratatui"]
+categories = ["command-line-utilities", "text-editors"]
 
 [dependencies]
 anyhow = "1.0.102"
@@ -10,3 +17,29 @@ dirs = "6.0.0"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 ratatui-textarea = { version = "0.9", features = ["crossterm", "search"] }
+
+# Strip and optimize release binaries (smaller archives, .deb and .msi payloads).
+[profile.release]
+strip = true
+lto = "thin"
+
+# Debian package metadata for `cargo deb`. Assets are left to cargo-deb's
+# defaults so that cross-target builds (`--target …`) resolve the binary path
+# automatically.
+[package.metadata.deb]
+maintainer = "dividebysandwich <josef.jahn@gmail.com>"
+copyright = "2026, dividebysandwich"
+section = "editors"
+priority = "optional"
+extended-description = """
+WordStar-rs is a faithful clone of DOS WordStar 7 for the modern terminal:
+the classic blue screen, the menu bar, the ruler, the control diamond and the
+^K/^Q/^P command chords, plus a built-in file browser, mouse support and a live
+Markdown preview. Documents are saved as Markdown.
+"""
+
+# WiX/MSI metadata for `cargo wix` (Windows installer).
+[package.metadata.wix]
+upgrade-guid = "6F2B7C1E-2A9D-4B3E-9C5A-1D2E3F4A5B6C"
+path-guid = "8A1C4D2F-7E3B-4A6C-9D8E-0F1A2B3C4D5E"
+

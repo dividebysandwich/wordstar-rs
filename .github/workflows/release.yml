@@ -1,0 +1,176 @@
+name: Release
+
+# Build release artifacts on every version tag (e.g. `v1.2.3`), and on manual
+# dispatch for testing. Tagged runs additionally publish a GitHub Release with
+# every artifact attached.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: wordstar-rs
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cross-platform .zip archives (Windows, Linux, macOS)
+  # ---------------------------------------------------------------------------
+  archive:
+    name: Archive (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            name: macos-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="${BIN_NAME}-${version}-${{ matrix.name }}"
+          mkdir "$stage"
+          bin="target/${{ matrix.target }}/release/${BIN_NAME}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="${bin}.exe"
+          fi
+          cp "$bin" "$stage/"
+          cp README.md "$stage/" || true
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${stage}.zip" "$stage" > /dev/null
+          else
+            zip -r "${stage}.zip" "$stage" > /dev/null
+          fi
+          echo "ASSET=${stage}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Windows MSI installer (cargo-wix / WiX Toolset)
+  # ---------------------------------------------------------------------------
+  msi:
+    name: Windows MSI
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Generate WiX sources
+        run: cargo wix init --force
+
+      - name: Build MSI
+        run: cargo wix --nocapture
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: target/wix/*.msi
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Debian packages: x86_64, Raspberry Pi 64-bit (aarch64) and 32-bit (armv7)
+  # ---------------------------------------------------------------------------
+  deb:
+    name: Debian (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            apt: ""
+          - target: aarch64-unknown-linux-gnu # Raspberry Pi 3/4/5 (64-bit)
+            apt: gcc-aarch64-linux-gnu
+          - target: armv7-unknown-linux-gnueabihf # Raspberry Pi 2/3 (32-bit)
+            apt: gcc-arm-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross toolchain
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      # The binary is stripped at compile time (profile.release.strip = true),
+      # so cargo-deb does not need a target-specific `strip`.
+      - name: Build .deb
+        run: cargo deb --no-strip --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.target }}
+          path: target/${{ matrix.target }}/debian/*.deb
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish: gather every artifact and attach it to the GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [archive, msi, deb]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: List artifacts
+        run: find dist -type f | sort
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
