@@ -11,10 +11,6 @@ use unicode_width::UnicodeWidthChar;
 
 /// One on-screen (visual) row of a logical line.
 pub struct VisualRow {
-    /// Index of the logical line (buffer line) this row belongs to.
-    pub logical: usize,
-    /// One past the last character column of this row.
-    pub end_col: usize,
     /// True if this is the last visual row of its logical line (i.e. the line
     /// ends here with a hard return — a paragraph break).
     pub last: bool,
@@ -23,39 +19,13 @@ pub struct VisualRow {
 /// Compute the visual-row layout for `lines` at the given wrap `mode`/`width`.
 pub fn layout(lines: &[String], mode: WrapMode, width: usize, tab: u8) -> Vec<VisualRow> {
     let mut rows = Vec::new();
-    for (logical, line) in lines.iter().enumerate() {
-        let ranges = line_ranges(line, mode, width, tab);
-        let n = ranges.len();
-        let mut start_col = 0usize;
-        for (i, (sb, eb)) in ranges.iter().copied().enumerate() {
-            let end_col = start_col + line[sb..eb].chars().count();
-            rows.push(VisualRow {
-                logical,
-                end_col,
-                last: i + 1 == n,
-            });
-            start_col = end_col;
+    for line in lines.iter() {
+        let n = line_ranges(line, mode, width, tab).len();
+        for i in 0..n {
+            rows.push(VisualRow { last: i + 1 == n });
         }
     }
     rows
-}
-
-/// Index of the visual row containing char column `col` of logical line `logical`.
-pub fn visual_index(rows: &[VisualRow], logical: usize, col: usize) -> usize {
-    let mut last_match = 0usize;
-    let mut found = false;
-    for (i, r) in rows.iter().enumerate() {
-        if r.logical == logical {
-            last_match = i;
-            found = true;
-            if col < r.end_col {
-                return i;
-            }
-        } else if found {
-            break;
-        }
-    }
-    last_match
 }
 
 // --- The following is copied from ratatui-textarea's `wrap.rs` so our layout
@@ -241,16 +211,5 @@ mod tests {
         let lasts: Vec<bool> = rows.iter().map(|r| r.last).collect();
         assert_eq!(*lasts.last().unwrap(), true);
         assert!(lasts[..lasts.len() - 1].iter().all(|b| !b));
-    }
-
-    #[test]
-    fn visual_index_finds_cursor_row() {
-        let l = lines(&["alpha beta gamma delta"]);
-        let rows = layout(&l, WrapMode::Word, 10, 4);
-        // Column 0 is on the first visual row.
-        assert_eq!(visual_index(&rows, 0, 0), 0);
-        // A column near the end lands on a later visual row.
-        let end = rows.last().unwrap().end_col;
-        assert_eq!(visual_index(&rows, 0, end), rows.len() - 1);
     }
 }

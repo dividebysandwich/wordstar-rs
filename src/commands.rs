@@ -139,12 +139,26 @@ pub fn execute(app: &mut App, cmd: Command) {
         WordRight => app.textarea.move_cursor(CursorMove::WordForward),
         LineStart => app.textarea.move_cursor(CursorMove::Head),
         LineEnd => app.textarea.move_cursor(CursorMove::End),
-        PageUp => app.textarea.scroll(Scrolling::PageUp),
-        PageDown => app.textarea.scroll(Scrolling::PageDown),
+        PageUp => {
+            let h = app.viewport_height();
+            app.textarea.scroll(Scrolling::PageUp);
+            app.scroll_viewport(-(h as isize));
+        }
+        PageDown => {
+            let h = app.viewport_height();
+            app.textarea.scroll(Scrolling::PageDown);
+            app.scroll_viewport(h as isize);
+        }
         DocStart => app.textarea.move_cursor(CursorMove::Top),
         DocEnd => app.textarea.move_cursor(CursorMove::Bottom),
-        ScrollUpLine => app.textarea.scroll((-1, 0)),
-        ScrollDownLine => app.textarea.scroll((1, 0)),
+        ScrollUpLine => {
+            app.textarea.scroll((-1, 0));
+            app.scroll_viewport(-1);
+        }
+        ScrollDownLine => {
+            app.textarea.scroll((1, 0));
+            app.scroll_viewport(1);
+        }
 
         DeleteChar => app.edit(|t| t.delete_next_char()),
         DeleteCharBack => app.edit(|t| t.delete_char()),

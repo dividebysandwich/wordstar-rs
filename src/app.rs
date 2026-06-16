@@ -169,6 +169,9 @@ pub struct App {
     pub menu_bar_area: Cell<Rect>,
     pub dropdown_area: Cell<Rect>,
     pub browser_list_area: Cell<Rect>,
+    /// First visible visual row of the editor viewport, tracked across frames so
+    /// the scrollbar thumb reflects the textarea's internal scroll position.
+    pub scroll_top: Cell<usize>,
 }
 
 impl App {
@@ -227,6 +230,7 @@ impl App {
             menu_bar_area: Cell::new(Rect::ZERO),
             dropdown_area: Cell::new(Rect::ZERO),
             browser_list_area: Cell::new(Rect::ZERO),
+            scroll_top: Cell::new(0),
         };
         app.apply_editor_theme();
         if imported {
@@ -340,8 +344,22 @@ impl App {
             self.textarea.delete_next_char();
         }
 
+        // `input()` maps the PageUp/PageDown keys to a viewport scroll of ±one
+        // screen height, internally, without going through our command path. Note
+        // the delta so we can mirror it onto our tracked scroll position below;
+        // otherwise the scrollbar thumb desyncs from the real viewport.
+        let scroll_delta = match input.key {
+            Key::PageUp => -(self.viewport_height() as isize),
+            Key::PageDown => self.viewport_height() as isize,
+            _ => 0,
+        };
+
         if self.textarea.input(input) {
             self.modified = true;
+        }
+
+        if scroll_delta != 0 {
+            self.scroll_viewport(scroll_delta);
         }
     }
 
@@ -1327,8 +1345,14 @@ impl App {
                     }
                 }
             }
-            MouseEventKind::ScrollDown => self.textarea.scroll((1, 0)),
-            MouseEventKind::ScrollUp => self.textarea.scroll((-1, 0)),
+            MouseEventKind::ScrollDown => {
+                self.textarea.scroll((1, 0));
+                self.scroll_viewport(1);
+            }
+            MouseEventKind::ScrollUp => {
+                self.textarea.scroll((-1, 0));
+                self.scroll_viewport(-1);
+            }
             _ => {}
         }
     }
@@ -1461,6 +1485,20 @@ impl App {
             MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(1),
             _ => {}
         }
+    }
+
+    /// Height of the editing viewport (rows), from the last render.
+    pub fn viewport_height(&self) -> usize {
+        self.editor_area.get().height as usize
+    }
+
+    /// Mirror an explicit `TextArea::scroll` on our tracked viewport top so the
+    /// scrollbar thumb stays in sync. The widget shifts its stored viewport top
+    /// by the same delta (saturating at zero) before pulling the cursor back into
+    /// view; render-time `next_scroll_top` then settles both identically.
+    pub fn scroll_viewport(&self, rows: isize) {
+        let top = self.scroll_top.get() as isize;
+        self.scroll_top.set((top + rows).max(0) as usize);
     }
 
     /// Map an editor-area click to a document `(row, col)`, using the cursor's

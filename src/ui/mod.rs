@@ -56,56 +56,128 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-/// Render the editing canvas plus the WordStar right-border flag column, which
-/// marks where lines end with a hard return (`<` = paragraph break) versus a
-/// soft word-wrap continuation (blank).
+/// Render the editing canvas plus the WordStar right-border columns: a flag
+/// column (`<` = paragraph break, blank = soft word-wrap continuation) and a
+/// vertical scrollbar, both on a black background.
 fn editor_pane(frame: &mut Frame, area: Rect, app: &App) {
     // The text widget only styles cells it draws into, so paint the whole canvas
     // WordStar-blue first; otherwise empty space shows the terminal's default bg.
     frame.render_widget(Block::default().style(theme::canvas()), area);
 
-    let flag_w: u16 = if area.width > 1 { 1 } else { 0 };
+    // Reserve two right-hand columns: the flag column and the scrollbar.
+    let reserve: u16 = if area.width >= 3 { 2 } else { 0 };
     let text_area = Rect {
-        width: area.width - flag_w,
+        width: area.width - reserve,
         ..area
     };
     app.editor_area.set(text_area);
     frame.render_widget(&app.textarea, text_area);
 
-    if flag_w == 1 {
-        let flags = flag_column(app, text_area);
-        let lines: Vec<Line> = flags
-            .into_iter()
-            .map(|c| Line::from(c.to_string()))
-            .collect();
-        let col = Rect::new(area.x + text_area.width, area.y, 1, area.height);
-        let style = theme::canvas().fg(ratatui::style::Color::LightCyan);
-        frame.render_widget(Paragraph::new(lines).style(style), col);
+    if reserve != 2 {
+        return;
+    }
+
+    let height = text_area.height as usize;
+    let (rows, top) = wrap_view(app, text_area);
+
+    // Flag column (black background).
+    let flag_style = Style::default()
+        .bg(ratatui::style::Color::Black)
+        .fg(ratatui::style::Color::LightCyan);
+    let flag_lines: Vec<Line> = (0..height)
+        .map(|y| {
+            let ch = match rows.get(top + y) {
+                Some(r) if r.last => '<', // hard return — paragraph break
+                _ => ' ',                 // soft wrap continuation or past EOF
+            };
+            Line::from(Span::styled(ch.to_string(), flag_style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(flag_lines).style(flag_style),
+        Rect::new(area.x + text_area.width, area.y, 1, area.height),
+    );
+
+    // Scrollbar column (black background).
+    frame.render_widget(
+        Paragraph::new(scrollbar_lines(rows.len(), top, height)),
+        Rect::new(area.x + text_area.width + 1, area.y, 1, area.height),
+    );
+}
+
+/// The wrapped visual-row layout and the index of the first visible row.
+///
+/// `screen_cursor().row` is the cursor's *absolute* visual-row index (across the
+/// whole document), not viewport-relative, so it can't tell us the scroll offset
+/// on its own. The widget derives its viewport top with a stateful "keep the
+/// cursor in view" rule; we replicate it here, tracking the previous top in
+/// `app.scroll_top`, so the scrollbar thumb mirrors the textarea's real scroll.
+fn wrap_view(app: &App, text_area: Rect) -> (Vec<crate::wrap::VisualRow>, usize) {
+    let rows = crate::wrap::layout(
+        app.textarea.lines(),
+        app.textarea.wrap_mode(),
+        text_area.width as usize,
+        app.textarea.tab_length(),
+    );
+    let cursor_row = app.textarea.screen_cursor().row;
+    let height = text_area.height as usize;
+    let top = next_scroll_top(app.scroll_top.get(), cursor_row, height);
+    app.scroll_top.set(top);
+    (rows, top)
+}
+
+/// Mirror of `ratatui-textarea`'s internal viewport scroll rule: keep `cursor`
+/// within `[top, top + height)`, moving `top` only as far as needed.
+fn next_scroll_top(prev_top: usize, cursor: usize, height: usize) -> usize {
+    if cursor < prev_top {
+        cursor
+    } else if height > 0 && prev_top + height <= cursor {
+        cursor + 1 - height
+    } else {
+        prev_top
     }
 }
 
-/// Compute the right-border flag character for each on-screen row.
-fn flag_column(app: &App, text_area: Rect) -> Vec<char> {
-    let width = text_area.width as usize;
-    let lines = app.textarea.lines();
-    let rows = crate::wrap::layout(
-        lines,
-        app.textarea.wrap_mode(),
-        width,
-        app.textarea.tab_length(),
-    );
-    let cursor = app.textarea.cursor();
-    let cursor_visual = crate::wrap::visual_index(&rows, cursor.0, cursor.1);
-    let screen_row = app.textarea.screen_cursor().row;
-    let top = cursor_visual.saturating_sub(screen_row);
+/// Build the scrollbar column: ↑ arrow, stippled track with a thumb, ↓ arrow.
+fn scrollbar_lines(total: usize, top: usize, height: usize) -> Vec<Line<'static>> {
+    use ratatui::style::Color;
+    let black = Style::default().bg(Color::Black);
+    let arrow = black.fg(Color::Gray);
+    let track = black.fg(Color::DarkGray);
+    let thumb = black.fg(Color::Gray);
 
-    (0..text_area.height as usize)
-        .map(|y| match rows.get(top + y) {
-            Some(r) if r.last => '<', // hard return — paragraph break
-            Some(_) => ' ',           // soft-wrapped line continuation
-            None => ' ',              // past end of document
-        })
-        .collect()
+    if height == 0 {
+        return Vec::new();
+    }
+    if height <= 2 {
+        return (0..height)
+            .map(|_| Line::from(Span::styled("↕", arrow)))
+            .collect();
+    }
+
+    let track_h = height - 2;
+    let total = total.max(1);
+    let view = height.min(total);
+    let thumb_len = (((track_h * view) as f32 / total as f32).round() as usize).clamp(1, track_h);
+    let max_top = total.saturating_sub(view);
+    let thumb_pos = if max_top == 0 {
+        0
+    } else {
+        (((track_h - thumb_len) as f32) * (top.min(max_top) as f32 / max_top as f32)).round()
+            as usize
+    };
+
+    let mut lines = Vec::with_capacity(height);
+    lines.push(Line::from(Span::styled("↑", arrow)));
+    for t in 0..track_h {
+        if t >= thumb_pos && t < thumb_pos + thumb_len {
+            lines.push(Line::from(Span::styled("█", thumb)));
+        } else {
+            lines.push(Line::from(Span::styled("▒", track)));
+        }
+    }
+    lines.push(Line::from(Span::styled("↓", arrow)));
+    lines
 }
 
 /// Render the editor region as read-only formatted text (the "hide markup"
@@ -923,12 +995,157 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // Flag column is the rightmost cell; the editor starts at y = 4.
-        let flag = |y: u16| buf[(39, y)].symbol().chars().next().unwrap();
+        // Columns (width 40): text 0..38, flag at 38, scrollbar at 39.
+        // The editor starts at y = 4.
+        let flag = |y: u16| buf[(38, y)].symbol().chars().next().unwrap();
         assert_eq!(flag(4), ' ', "wrapped continuation row has no flag");
         assert_eq!(flag(5), '<', "paragraph end (hard return) is flagged");
         assert_eq!(flag(6), '<', "second paragraph end is flagged");
         assert_eq!(flag(7), ' ', "past end of document is blank");
+    }
+
+    #[test]
+    fn scrollbar_has_arrows_and_thumb() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("a line");
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Scrollbar is the rightmost column (x = 39); editor rows are y = 4..=8.
+        let sym = |y: u16| buf[(39, y)].symbol().to_string();
+        assert_eq!(sym(4), "↑", "up arrow at top");
+        assert_eq!(sym(8), "↓", "down arrow at bottom");
+        // The whole short document fits, so the thumb fills the track.
+        assert_eq!(
+            sym(5),
+            "█",
+            "thumb fills the track when nothing is scrolled"
+        );
+        // Black background behind the flag/scrollbar columns.
+        assert_eq!(buf[(39, 4)].bg, ratatui::style::Color::Black);
+        assert_eq!(buf[(38, 4)].bg, ratatui::style::Color::Black);
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_scroll_position() {
+        use ratatui_textarea::CursorMove;
+        let mut app = App::new(None).unwrap();
+        for i in 0..60 {
+            app.textarea.insert_str(format!("line {i}"));
+            app.textarea.insert_newline();
+        }
+        // Editor rows are y = 4..=8; the track (between the arrows) is y = 5..=7.
+        let thumb_y = |app: &App| -> Option<u16> {
+            let backend = TestBackend::new(40, 10);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (5..=7).find(|&y| buf[(39, y)].symbol() == "█")
+        };
+
+        // Cursor at the very top: thumb sits at the top of the track.
+        app.textarea.move_cursor(CursorMove::Top);
+        assert_eq!(
+            thumb_y(&app),
+            Some(5),
+            "thumb at top when scrolled to start"
+        );
+
+        // Cursor at the very bottom: thumb moves to the bottom of the track.
+        app.textarea.move_cursor(CursorMove::Bottom);
+        app.textarea.move_cursor(CursorMove::End);
+        assert_eq!(
+            thumb_y(&app),
+            Some(7),
+            "thumb at bottom when scrolled to end"
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_follows_page_down() {
+        use crate::commands::{Command, execute};
+        use ratatui_textarea::CursorMove;
+        let mut app = App::new(None).unwrap();
+        for i in 0..60 {
+            app.textarea.insert_str(format!("line {i}"));
+            app.textarea.insert_newline();
+        }
+        app.textarea.move_cursor(CursorMove::Top);
+
+        let thumb_y = |app: &App| -> Option<u16> {
+            let backend = TestBackend::new(40, 10);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (5..=7).find(|&y| buf[(39, y)].symbol() == "█")
+        };
+
+        // First render establishes the viewport height; thumb starts at the top.
+        assert_eq!(thumb_y(&app), Some(5), "thumb at top before paging");
+
+        // Paging down repeatedly must walk the thumb toward the bottom — the bug
+        // was that explicit scrolls left it pinned in place.
+        for _ in 0..30 {
+            execute(&mut app, Command::PageDown);
+        }
+        assert_eq!(
+            thumb_y(&app),
+            Some(7),
+            "thumb reaches the bottom after paging down"
+        );
+
+        // And paging back up returns it to the top.
+        for _ in 0..30 {
+            execute(&mut app, Command::PageUp);
+        }
+        assert_eq!(
+            thumb_y(&app),
+            Some(5),
+            "thumb returns to top after paging up"
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_follows_pagedown_key() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(None).unwrap();
+        for i in 0..60 {
+            app.textarea.insert_str(format!("line {i}"));
+            app.textarea.insert_newline();
+        }
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+
+        let thumb_y = |app: &App| -> Option<u16> {
+            let backend = TestBackend::new(40, 10);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (5..=7).find(|&y| buf[(39, y)].symbol() == "█")
+        };
+
+        // Establish the viewport height; thumb starts at the top.
+        assert_eq!(thumb_y(&app), Some(5), "thumb at top before paging");
+
+        // The PageDown *key* scrolls via `TextArea::input`, a different path than
+        // the ^C command — it must still drive the thumb. This was the bug.
+        for _ in 0..30 {
+            app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            thumb_y(&app),
+            Some(7),
+            "thumb reaches the bottom after PageDown key"
+        );
+
+        for _ in 0..30 {
+            app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        assert_eq!(
+            thumb_y(&app),
+            Some(5),
+            "thumb returns to top after PageUp key"
+        );
     }
 }
 
