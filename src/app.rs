@@ -130,6 +130,11 @@ pub struct App {
     pub menu: crate::menu::MenuState,
     /// Current paragraph alignment choice.
     pub align: AlignChoice,
+    /// Persistent clipboard for block copy / cut / paste.
+    pub block_buffer: String,
+    /// True while a block is being marked, so cursor movement extends the
+    /// selection even with plain (un-shifted) movement keys.
+    marking: bool,
     /// Terminal graphics picker (set at startup when a TTY is available).
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Whether a real graphics protocol (Kitty/iTerm2/Sixel) is available.
@@ -200,6 +205,8 @@ impl App {
             help_scroll: 0,
             menu: crate::menu::MenuState::default(),
             align: AlignChoice::Left,
+            block_buffer: String::new(),
+            marking: false,
             picker: None,
             graphics: false,
             preview_job: None,
@@ -282,7 +289,27 @@ impl App {
 
     /// Hand a key to the text widget, honoring overtype mode for printable input.
     fn pass_to_editor(&mut self, key: KeyEvent) {
-        let input: Input = key.into();
+        let mut input: Input = key.into();
+
+        // While marking a block, keep movement keys extending the selection
+        // (the widget cancels the selection on an un-shifted move otherwise).
+        if self.marking {
+            if matches!(
+                input.key,
+                Key::Left
+                    | Key::Right
+                    | Key::Up
+                    | Key::Down
+                    | Key::Home
+                    | Key::End
+                    | Key::PageUp
+                    | Key::PageDown
+            ) {
+                input.shift = true;
+            } else {
+                self.marking = false;
+            }
+        }
 
         // Overtype: replace the character under the cursor instead of inserting,
         // unless we are at end-of-line (where overtype behaves like insert).
@@ -905,57 +932,103 @@ impl App {
     // Block operations (mapped onto the text widget's selection + yank buffer)
     // ------------------------------------------------------------------
 
-    /// `^KB` — mark the start of a block (begin selecting).
+    /// `^KB` — mark the start of a block (begin selecting at the cursor).
     pub fn block_begin(&mut self) {
         self.textarea.cancel_selection();
         self.textarea.start_selection();
-        self.set_status("Block start marked — move the cursor, then ^KC/^KV/^KY.");
+        self.marking = true;
+        self.set_status("Block start marked — move the cursor, then ^KC copy / ^KY cut.");
     }
 
-    /// `^KK` — mark the end of a block and copy it to the block buffer.
+    /// `^KK` — mark the end of the block (the selection runs start → cursor).
     pub fn block_end(&mut self) {
-        if self.textarea.is_selecting() {
-            self.textarea.copy();
-            self.set_status("Block marked and copied to buffer (^KV to paste).");
-        } else {
-            self.set_status("No block. Mark the start with ^KB first.");
+        match self.selected_text() {
+            Some(text) => {
+                let n = text.chars().count();
+                self.set_status(format!(
+                    "Block marked: {n} chars.  ^KC copy · ^KY cut · ^KH clear"
+                ));
+            }
+            None => self.set_status("Mark the block start first with ^KB."),
         }
     }
 
-    /// `^KC` — copy the marked block to the block buffer.
+    /// `^KC` — copy the marked block to the block clipboard.
     pub fn block_copy(&mut self) {
-        if self.textarea.is_selecting() {
-            self.textarea.copy();
-            self.set_status("Block copied to buffer (^KV to paste).");
-        } else {
-            self.set_status("No block selected. Use ^KB to begin.");
+        match self.selected_text() {
+            Some(text) => {
+                let n = text.chars().count();
+                self.block_buffer = text;
+                self.clear_marking();
+                self.set_status(format!(
+                    "Copied {n} chars — move the cursor and press ^KV to paste."
+                ));
+            }
+            None => self.set_status("No block marked. Press ^KB, then move the cursor."),
         }
     }
 
-    /// `^KV` — insert the block buffer at the cursor (copy/move destination).
+    /// `^KY` — cut the marked block to the clipboard and remove it.
+    pub fn block_delete(&mut self) {
+        match self.selected_text() {
+            Some(text) => {
+                let n = text.chars().count();
+                self.block_buffer = text;
+                self.edit(|t| t.cut());
+                self.clear_marking();
+                self.set_status(format!("Cut {n} chars — press ^KV to paste."));
+            }
+            None => self.set_status("No block marked. Press ^KB, then move the cursor."),
+        }
+    }
+
+    /// `^KV` — paste the block clipboard at the cursor.
     pub fn block_move(&mut self) {
-        if self.textarea.yank_text().is_empty() {
-            self.set_status("Block buffer is empty. Copy a block first (^KC).");
+        if self.block_buffer.is_empty() {
+            self.set_status("Block clipboard is empty. Copy (^KC) or cut (^KY) a block first.");
             return;
         }
-        self.edit(|t| t.paste());
-        self.set_status("Block pasted at cursor.");
-    }
-
-    /// `^KY` — delete the marked block (also captured to the buffer).
-    pub fn block_delete(&mut self) {
-        if self.textarea.is_selecting() {
-            self.edit(|t| t.cut());
-            self.set_status("Block deleted.");
-        } else {
-            self.set_status("No block selected. Use ^KB to begin.");
+        self.clear_marking();
+        let text = self.block_buffer.clone();
+        let n = text.chars().count();
+        if self.textarea.insert_str(text) {
+            self.modified = true;
         }
+        self.set_status(format!("Pasted {n} chars at the cursor."));
     }
 
-    /// `^KH` — hide/clear the block markers (cancel selection).
+    /// `^KH` — clear the block markers (cancel the selection).
     pub fn block_hide(&mut self) {
+        self.clear_marking();
+        self.set_status("Block markers cleared.");
+    }
+
+    /// Stop marking and drop any active selection highlight.
+    fn clear_marking(&mut self) {
+        self.marking = false;
         self.textarea.cancel_selection();
-        self.set_status("Block markers hidden.");
+    }
+
+    /// The currently selected text, if any (used for block copy/cut).
+    fn selected_text(&self) -> Option<String> {
+        let ((sr, sc), (er, ec)) = self.textarea.selection_range()?;
+        if (sr, sc) == (er, ec) {
+            return None; // empty selection
+        }
+        let lines = self.textarea.lines();
+        if sr == er {
+            let line = &lines[sr];
+            Some(line.chars().skip(sc).take(ec - sc).collect())
+        } else {
+            let mut out: String = lines[sr].chars().skip(sc).collect();
+            out.push('\n');
+            for line in &lines[sr + 1..er] {
+                out.push_str(line);
+                out.push('\n');
+            }
+            out.extend(lines[er].chars().take(ec));
+            Some(out)
+        }
     }
 
     /// Run an editing closure, marking the buffer modified if it changed.
@@ -1547,5 +1620,63 @@ mod tests {
         let mut p = App::new(None).unwrap();
         p.preview_off = (0.5, 0.0);
         assert_ne!(base, p.zoom_view_key(area), "pan changes the key");
+    }
+
+    fn select_world(app: &mut App) {
+        // "hello world" with the cursor selecting "world" (cols 6..11).
+        app.textarea.insert_str("hello world");
+        app.textarea.move_cursor(CursorMove::Head);
+        for _ in 0..6 {
+            app.textarea.move_cursor(CursorMove::Forward);
+        }
+        app.block_begin(); // start selection at col 6
+        app.textarea.move_cursor(CursorMove::End); // extends to col 11
+    }
+
+    #[test]
+    fn block_copy_then_paste() {
+        let mut app = App::new(None).unwrap();
+        select_world(&mut app);
+        app.block_copy();
+        assert_eq!(app.block_buffer, "world");
+        assert!(!app.textarea.is_selecting(), "copy clears the selection");
+        app.textarea.move_cursor(CursorMove::Head);
+        app.block_move(); // paste
+        assert_eq!(app.textarea.lines(), ["worldhello world"]);
+    }
+
+    #[test]
+    fn block_cut_then_paste() {
+        let mut app = App::new(None).unwrap();
+        select_world(&mut app);
+        app.block_delete(); // cut
+        assert_eq!(app.block_buffer, "world");
+        assert_eq!(app.textarea.lines(), ["hello "]);
+        app.textarea.move_cursor(CursorMove::Head);
+        app.block_move(); // paste
+        assert_eq!(app.textarea.lines(), ["worldhello "]);
+    }
+
+    #[test]
+    fn plain_arrows_extend_selection_while_marking() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("abcdef");
+        app.textarea.move_cursor(CursorMove::Head);
+        app.block_begin();
+        // Three plain Right arrows should extend the selection, not cancel it.
+        for _ in 0..3 {
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        app.block_copy();
+        assert_eq!(app.block_buffer, "abc");
+    }
+
+    #[test]
+    fn paste_with_empty_clipboard_is_noop() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("text");
+        app.block_move();
+        assert_eq!(app.textarea.lines(), ["text"]);
     }
 }

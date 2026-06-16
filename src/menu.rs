@@ -61,8 +61,8 @@ static EDIT: &[MenuItem] = &[
     item("Mark Block Begin", "^KB", Command::BlockBegin),
     item("Mark Block End", "^KK", Command::BlockEnd),
     item("Copy Block", "^KC", Command::BlockCopy),
+    item("Cut Block", "^KY", Command::BlockDelete),
     item("Paste Block", "^KV", Command::BlockMove),
-    item("Delete Block", "^KY", Command::BlockDelete),
 ];
 
 static VIEW: &[MenuItem] = &[

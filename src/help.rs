@@ -75,12 +75,12 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^L", "Find next");
 
     head(&mut out, "Blocks");
-    row(&mut out, "^KB", "Mark block start");
-    row(&mut out, "^KK", "Mark block end (copy to buffer)");
-    row(&mut out, "^KC", "Copy block to buffer");
+    row(&mut out, "^KB", "Mark block start (then move cursor)");
+    row(&mut out, "^KK", "Mark block end");
+    row(&mut out, "^KC", "Copy block to clipboard");
+    row(&mut out, "^KY", "Cut block to clipboard");
     row(&mut out, "^KV", "Paste block at cursor");
-    row(&mut out, "^KY", "Delete block");
-    row(&mut out, "^KH", "Hide block markers");
+    row(&mut out, "^KH", "Clear block markers");
 
     head(&mut out, "Formatting (markdown)");
     row(&mut out, "^PB", "Bold  (**…**)");
