@@ -1,6 +1,6 @@
 # WordStar-rs
 
-A faithful clone of DOS **WordStar 7** for the modern terminal — the blue
+A reimplementation of DOS **WordStar 7** for the modern terminal — the blue
 screen, the menu bar, the ruler, the status line, and above all the **control
 diamond** and the `^K`/`^Q`/`^P` command chords you already have in your
 fingers. Files are written as plain **Markdown**, so your manuscripts stay
@@ -236,6 +236,7 @@ read-only view — press `^OD` again (or `Esc`) to return to editing.
 | `^KS` / `F2`  | Save                    |
 | `^KD`         | Save and keep editing   |
 | `^KX`         | Save and exit           |
+| `^KR`         | Insert another file at the cursor |
 | `^KP`         | Export to PDF           |
 | `^KQ` / `F10` | Quit (asks before discarding unsaved changes) |
 | `F3`          | Open the file browser   |
@@ -243,24 +244,58 @@ read-only view — press `^OD` again (or `Esc`) to return to editing.
 | `F1` / `^J`   | Help                    |
 | `F9`          | Open the menu bar       |
 
+### Insert and utilities
+
+| Keys  | Action                          |
+| ----- | ------------------------------- |
+| `^KR` | Insert another file at the cursor (WordStar `.WS` files are decoded too) |
+| `^K?` | Word count — words, characters, lines, and paragraphs |
+| `^QI` | Go to page                      |
+| —     | **Page Break** / **Column Break** (Insert menu) insert `.pa` / `.cb` |
+| —     | **Headers / Footers** (Layout menu) — see below |
+
 Press **F1** inside the program at any time for this command reference.
+
+### Headers, footers, and page breaks
+
+The **Layout → Headers/Footers** submenu opens a dialog for a header or footer
+line. Type the text, choose whether it applies to **Both**, **Odd**, or **Even**
+pages (↑/↓), and press **Enter**. These are stored as WordStar **dot commands**
+at the top of the document (`.he`/`.oh`/`.eh` for headers, `.fo`/`.of`/`.ef` for
+footers); **Page Break** and **Column Break** insert `.pa` and `.cb`.
+
+Dot commands are print directives, not body text, so they are shown as plain
+lines while editing but are **omitted from the preview, the `^OD` clean view, and
+PDF export** — they don't appear as literal `.he …` text in your formatted
+output.
 
 ---
 
 ## Menus
 
-Press **F9** to open the menu bar. Use **←/→** to move between menus, **↑/↓** to
-move through items, **Enter** to choose, and **Esc** to close. Pressing a menu's
-initial letter jumps straight to it.
+Press **F9** to open the menu bar. The eight menus follow WordStar 7's layout.
+Use **←/→** to move between menus, **↑/↓** to move through items, **Enter** to
+choose, and **Esc** to close. Pressing a menu's initial letter jumps straight to
+it. Items that open a **submenu** are marked with a `▶`; press **→** (or click)
+to open it and **←** to step back.
 
-- **File** — New, Open…, Save, Save As…, Save & Exit, Exit
-- **Edit** — Undo, and the block operations (mark, copy, paste, delete)
-- **View** — Preview, Insert/Overtype
-- **Insert** — Bold, Italic, Underline
-- **Style** — Font…, Font Size…, Clear Formatting
-- **Layout** — Align Left, Center, Right, Justify
-- **Utilities** — Find…, Replace…, Find Next
+- **File** — Open/Switch…, Close, Save, Save As…, Save and Close, Export PDF…,
+  Exit WordStar
+- **Edit** — Undo · mark/copy/move/delete a block · Find…, Find and Replace…,
+  Next Find, Go to Page…
+- **View** — Preview · Command Tags (show/hide markup), Block Highlighting,
+  Word Wrap · Insert / Overtype
+- **Insert** — Page Break, Column Break · **File…** (insert another file)
+- **Style** — Bold, Italic, Underline, Strikeout, Font…, Font Size… ·
+  Clear Formatting
+- **Layout** — Center / Right / Left / Justify line · **Headers/Footers ▶**
+  (Header…, Footer…)
+- **Utilities** — Word Count · Spelling Check, Thesaurus, Calculator, Sort Block
 - **Help** — Help Topics, About
+
+A few WordStar features that have no equivalent here yet (printing, spell check,
+the thesaurus, the calculator, block sort) appear in the menus for familiarity
+but report that they are not implemented when chosen.
 
 ---
 

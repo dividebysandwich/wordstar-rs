@@ -43,6 +43,10 @@ pub enum Mode {
     Preview,
     /// The help overlay is open.
     Help,
+    /// A dismissable information modal (e.g. Word Count).
+    Info,
+    /// The header / footer dialog.
+    Header,
 }
 
 /// Which kind of single-line prompt is active.
@@ -55,6 +59,41 @@ pub enum PromptKind {
     Font,
     FontSize,
     ExportPdf,
+    /// Insert another file's contents at the cursor (^KR).
+    InsertFile,
+    /// Jump to a page number.
+    GoToPage,
+}
+
+/// Header vs. footer for the [`Mode::Header`] dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderKind {
+    Header,
+    Footer,
+}
+
+/// Which pages a header / footer applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeaderPages {
+    #[default]
+    Both,
+    Odd,
+    Even,
+}
+
+/// State backing the [`Mode::Header`] dialog.
+#[derive(Debug, Clone)]
+pub struct HeaderState {
+    pub kind: HeaderKind,
+    pub text: String,
+    pub pages: HeaderPages,
+}
+
+/// A dismissable information modal (title + body lines).
+#[derive(Debug, Clone, Default)]
+pub struct InfoState {
+    pub title: String,
+    pub lines: Vec<String>,
 }
 
 /// A pending action awaiting yes/no confirmation in [`Mode::Confirm`].
@@ -120,6 +159,10 @@ pub struct App {
     pub prompt: PromptState,
     /// Active confirmation modal (present when `mode == Confirm`).
     pub confirm: Option<ConfirmState>,
+    /// Active information modal (present when `mode == Info`).
+    pub info: Option<InfoState>,
+    /// Active header/footer dialog (present when `mode == Header`).
+    pub header_dialog: Option<HeaderState>,
     /// Active file browser (present when `mode == Browser`).
     pub browser: Option<crate::browser::Browser>,
     /// Scroll offset for the preview overlay.
@@ -168,6 +211,8 @@ pub struct App {
     pub editor_area: Cell<Rect>,
     pub menu_bar_area: Cell<Rect>,
     pub dropdown_area: Cell<Rect>,
+    /// Geometry of the open submenu panel, for mouse hit-testing.
+    pub sub_dropdown_area: Cell<Rect>,
     pub browser_list_area: Cell<Rect>,
     /// First visible visual row of the editor viewport, tracked across frames so
     /// the scrollbar thumb reflects the textarea's internal scroll position.
@@ -205,6 +250,8 @@ impl App {
             status_msg: None,
             prompt: PromptState::default(),
             confirm: None,
+            info: None,
+            header_dialog: None,
             browser: None,
             preview_scroll: 0,
             help_scroll: 0,
@@ -229,6 +276,7 @@ impl App {
             editor_area: Cell::new(Rect::ZERO),
             menu_bar_area: Cell::new(Rect::ZERO),
             dropdown_area: Cell::new(Rect::ZERO),
+            sub_dropdown_area: Cell::new(Rect::ZERO),
             browser_list_area: Cell::new(Rect::ZERO),
             scroll_top: Cell::new(0),
         };
@@ -294,6 +342,8 @@ impl App {
             Mode::Browser => self.handle_browser_key(key),
             Mode::Preview => self.handle_preview_key(key),
             Mode::Help => self.handle_overlay_key(key, OverlayKind::Help),
+            Mode::Info => self.handle_info_key(key),
+            Mode::Header => self.handle_header_key(key),
         }
     }
 
@@ -386,18 +436,20 @@ impl App {
     }
 
     fn handle_menu_key(&mut self, key: KeyEvent) {
+        use crate::menu::Activation;
         match key.code {
             KeyCode::Esc | KeyCode::F(9) => self.mode = Mode::Editor,
-            KeyCode::Left => self.menu.prev_menu(),
-            KeyCode::Right => self.menu.next_menu(),
+            KeyCode::Left => self.menu.move_left(),
+            KeyCode::Right => self.menu.move_right(),
             KeyCode::Up => self.menu.prev_item(),
             KeyCode::Down => self.menu.next_item(),
-            KeyCode::Enter => {
-                if let Some(cmd) = self.menu.selected_command() {
+            KeyCode::Enter => match self.menu.activate() {
+                Activation::Run(cmd) => {
                     self.mode = Mode::Editor;
                     commands::execute(self, cmd);
                 }
-            }
+                Activation::OpenedSubmenu | Activation::None => {}
+            },
             KeyCode::Char(c) => {
                 // A letter jumps to the matching menu title.
                 self.menu.jump_to_title(c);
@@ -534,6 +586,19 @@ impl App {
                         self.apply_format("[", &close, &format!("Size: {n}"));
                     }
                     Err(_) => self.set_status("Size must be a number."),
+                }
+            }
+            PromptKind::InsertFile => {
+                let name = self.prompt.input.clone();
+                self.mode = Mode::Editor;
+                self.insert_file(&name);
+            }
+            PromptKind::GoToPage => {
+                let raw = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                match raw.parse::<usize>() {
+                    Ok(n) => self.goto_page(n),
+                    Err(_) => self.set_status("Page must be a number."),
                 }
             }
             PromptKind::Replace => {
@@ -1143,6 +1208,201 @@ impl App {
         self.modified = true;
     }
 
+    // ------------------------------------------------------------------
+    // Insert / utility commands
+    // ------------------------------------------------------------------
+
+    /// Open the "insert file" prompt (^KR).
+    pub fn start_insert_file(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::InsertFile,
+            label: "Insert file:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Read `path` and insert its text at the cursor. WordStar files are decoded
+    /// to Markdown just like when opening them.
+    fn insert_file(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.set_status("Insert cancelled (no name).");
+            return;
+        }
+        match crate::wordstar::load(Path::new(path)) {
+            Ok(loaded) => {
+                if self.textarea.insert_str(&loaded.text) {
+                    self.modified = true;
+                }
+                self.set_status(format!("Inserted {path}."));
+            }
+            Err(e) => {
+                self.set_status(format!("Cannot insert {path}: {e}"));
+                ring_bell();
+            }
+        }
+    }
+
+    /// Insert a WordStar dot command on its own line at the cursor.
+    pub fn insert_dot_command(&mut self, dot: &str, status: &str) {
+        // Dot commands must sit at column 1, so start a fresh line if needed.
+        if self.textarea.cursor().1 != 0 {
+            self.textarea.insert_newline();
+        }
+        self.textarea.insert_str(dot);
+        self.textarea.insert_newline();
+        self.modified = true;
+        self.set_status(status.to_string());
+    }
+
+    /// Open the page-jump prompt.
+    pub fn start_goto_page(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::GoToPage,
+            label: "Go to page:".into(),
+            input: String::new(),
+            pending_find: None,
+        };
+    }
+
+    /// Jump the cursor to the first line of the given 1-based page (55 lines/page,
+    /// matching the status-line page metric).
+    fn goto_page(&mut self, page: usize) {
+        let page = page.max(1);
+        let target =
+            ((page - 1) * LINES_PER_PAGE).min(self.textarea.lines().len().saturating_sub(1));
+        self.textarea
+            .move_cursor(CursorMove::Jump(target as u16, 0));
+        self.set_status(format!("Page {page}."));
+    }
+
+    /// Open the header / footer dialog.
+    pub fn start_header(&mut self, kind: HeaderKind) {
+        self.mode = Mode::Header;
+        self.header_dialog = Some(HeaderState {
+            kind,
+            text: String::new(),
+            pages: HeaderPages::Both,
+        });
+    }
+
+    fn handle_header_key(&mut self, key: KeyEvent) {
+        let Some(h) = self.header_dialog.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.header_dialog = None;
+                self.mode = Mode::Editor;
+                self.set_status("Cancelled.");
+            }
+            KeyCode::Enter => self.commit_header(),
+            KeyCode::Up => {
+                h.pages = match h.pages {
+                    HeaderPages::Both => HeaderPages::Even,
+                    HeaderPages::Odd => HeaderPages::Both,
+                    HeaderPages::Even => HeaderPages::Odd,
+                };
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                h.pages = match h.pages {
+                    HeaderPages::Both => HeaderPages::Odd,
+                    HeaderPages::Odd => HeaderPages::Even,
+                    HeaderPages::Even => HeaderPages::Both,
+                };
+            }
+            KeyCode::Backspace => {
+                h.text.pop();
+            }
+            KeyCode::Char(c) => h.text.push(c),
+            _ => {}
+        }
+    }
+
+    /// Insert the configured header/footer as a WordStar dot command at the top
+    /// of the document.
+    fn commit_header(&mut self) {
+        let Some(h) = self.header_dialog.take() else {
+            return;
+        };
+        self.mode = Mode::Editor;
+        let text = h.text.trim();
+        if text.is_empty() {
+            self.set_status("Header cancelled (no text).");
+            return;
+        }
+        // `.he`/`.fo` = both pages, `.oh`/`.of` = odd, `.eh`/`.ef` = even.
+        let dot = match (h.kind, h.pages) {
+            (HeaderKind::Header, HeaderPages::Both) => ".he",
+            (HeaderKind::Header, HeaderPages::Odd) => ".oh",
+            (HeaderKind::Header, HeaderPages::Even) => ".eh",
+            (HeaderKind::Footer, HeaderPages::Both) => ".fo",
+            (HeaderKind::Footer, HeaderPages::Odd) => ".of",
+            (HeaderKind::Footer, HeaderPages::Even) => ".ef",
+        };
+        let line = format!("{dot} {text}");
+        self.textarea.move_cursor(CursorMove::Top);
+        self.textarea.move_cursor(CursorMove::Head);
+        self.textarea.insert_str(&line);
+        self.textarea.insert_newline();
+        self.modified = true;
+        let what = match h.kind {
+            HeaderKind::Header => "Header",
+            HeaderKind::Footer => "Footer",
+        };
+        self.set_status(format!("{what} set: {line}"));
+    }
+
+    /// Show document statistics in an info modal (^K?).
+    pub fn show_word_count(&mut self) {
+        let mut words = 0usize;
+        let mut chars = 0usize;
+        let mut paragraphs = 0usize;
+        let mut in_para = false;
+        let lines = self.textarea.lines();
+        for line in lines {
+            if is_dot_command(line) {
+                continue;
+            }
+            let text = crate::attributes::strip_inline_markers(line);
+            let n = text.split_whitespace().count();
+            words += n;
+            chars += text.chars().count();
+            if text.trim().is_empty() {
+                in_para = false;
+            } else if !in_para {
+                paragraphs += 1;
+                in_para = true;
+            }
+        }
+        self.info = Some(InfoState {
+            title: "Word Count".into(),
+            lines: vec![
+                format!("Words:       {words}"),
+                format!("Characters:  {chars}"),
+                format!("Lines:       {}", lines.len()),
+                format!("Paragraphs:  {paragraphs}"),
+            ],
+        });
+        self.mode = Mode::Info;
+    }
+
+    fn handle_info_key(&mut self, _key: KeyEvent) {
+        // Any key dismisses the modal.
+        self.info = None;
+        self.mode = Mode::Editor;
+    }
+
+    /// Report that a menu feature is not implemented yet.
+    pub fn not_implemented(&mut self, feature: &str) {
+        self.set_status(format!("{feature} is not implemented yet."));
+        ring_bell();
+    }
+
     /// Start a new, empty document (no path).
     pub fn new_document(&mut self) {
         self.textarea = TextArea::default();
@@ -1298,7 +1558,13 @@ impl App {
             Mode::Browser => self.mouse_browser(me),
             Mode::Preview => self.mouse_preview(me),
             Mode::Help => self.mouse_scroll(me, OverlayKind::Help),
-            Mode::Prompt | Mode::Confirm => {} // keyboard-only
+            Mode::Info => {
+                if me.kind == MouseEventKind::Down(MouseButton::Left) {
+                    self.info = None;
+                    self.mode = Mode::Editor;
+                }
+            }
+            Mode::Prompt | Mode::Confirm | Mode::Header => {} // keyboard-only
         }
     }
 
@@ -1358,6 +1624,7 @@ impl App {
     }
 
     fn mouse_menu(&mut self, me: MouseEvent) {
+        use crate::menu::Activation;
         if me.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
         }
@@ -1368,20 +1635,41 @@ impl App {
             }
             return;
         }
-        let dd = self.dropdown_area.get();
-        let inside = dd.height > 1
-            && me.row > dd.y
-            && me.row < dd.y + dd.height - 1
-            && me.column > dd.x
-            && me.column < dd.x + dd.width - 1;
-        if inside {
-            let item = (me.row - dd.y - 1) as usize;
+
+        // A click inside the open submenu panel selects and runs a leaf.
+        let row_in = |r: Rect| -> Option<usize> {
+            (r.height > 1
+                && me.row > r.y
+                && me.row < r.y + r.height - 1
+                && me.column > r.x
+                && me.column < r.x + r.width - 1)
+                .then(|| (me.row - r.y - 1) as usize)
+        };
+
+        if self.menu.sub_open
+            && let Some(items) = self.menu.submenu_items()
+            && let Some(item) = row_in(self.sub_dropdown_area.get())
+            && item < items.len()
+        {
+            self.menu.sub_item = item;
+            if let Activation::Run(cmd) = self.menu.activate() {
+                self.mode = Mode::Editor;
+                commands::execute(self, cmd);
+            }
+            return;
+        }
+
+        if let Some(item) = row_in(self.dropdown_area.get()) {
             let count = crate::menu::MENUS[self.menu.menu].items.len();
             if item < count {
+                self.menu.sub_open = false;
                 self.menu.item = item;
-                if let Some(cmd) = self.menu.selected_command() {
-                    self.mode = Mode::Editor;
-                    commands::execute(self, cmd);
+                match self.menu.activate() {
+                    Activation::Run(cmd) => {
+                        self.mode = Mode::Editor;
+                        commands::execute(self, cmd);
+                    }
+                    Activation::OpenedSubmenu | Activation::None => {}
                 }
             }
             return;
@@ -1574,7 +1862,7 @@ impl App {
             line: line + 1,
             column: col + 1,
             // Page: ~54 text lines per page (9" at 6 lines/inch).
-            page: line / 54 + 1,
+            page: line / LINES_PER_PAGE + 1,
             // Vertical position: 0.5" top margin + 6 lines/inch.
             vertical_inches: 0.5 + line as f32 / 6.0,
             // Horizontal position: 10 chars/inch (pica).
@@ -1597,6 +1885,17 @@ pub struct CursorMetrics {
 enum OverlayKind {
     Preview,
     Help,
+}
+
+/// Approximate text lines per printed page (9" at 6 lines/inch), used for the
+/// status-line page metric and "go to page".
+const LINES_PER_PAGE: usize = 54;
+
+/// True if `line` is a WordStar dot command (a `.` at column 1 followed by a
+/// letter, e.g. `.he`, `.pa`). Such lines are print directives, not body text.
+pub fn is_dot_command(line: &str) -> bool {
+    let mut chars = line.chars();
+    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 /// Split loaded document text into editor lines (never empty).
@@ -1633,6 +1932,7 @@ fn ring_bell() {
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
+    use ratatui::crossterm::event::KeyModifiers;
     use ratatui_image::picker::Picker;
 
     fn page(color: u8) -> RgbaImage {
@@ -1749,5 +2049,103 @@ mod tests {
         app.textarea.insert_str("text");
         app.block_move();
         assert_eq!(app.textarea.lines(), ["text"]);
+    }
+
+    #[test]
+    fn word_count_reports_words_and_paragraphs() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("one **two** three\n\nfour five");
+        app.show_word_count();
+        assert_eq!(app.mode, Mode::Info);
+        let info = app.info.as_ref().unwrap();
+        let body = info.lines.join("\n");
+        // Markers are stripped, so "**two**" counts as one word: 5 total.
+        assert!(body.contains("Words:       5"), "got:\n{body}");
+        assert!(body.contains("Paragraphs:  2"), "got:\n{body}");
+        // Any key dismisses it.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert!(app.info.is_none());
+    }
+
+    #[test]
+    fn insert_file_inserts_contents_at_cursor() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("wsrs_insert_test.txt");
+        std::fs::write(&path, "INSERTED").unwrap();
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("AB");
+        app.textarea.move_cursor(CursorMove::Head); // cursor before "AB"
+        app.insert_file(path.to_str().unwrap());
+        assert_eq!(app.textarea.lines(), ["INSERTEDAB"]);
+        assert!(app.modified);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn header_dialog_inserts_dot_command_at_top() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Body text");
+        app.start_header(HeaderKind::Header);
+        assert_eq!(app.mode, Mode::Header);
+        for c in "My Title".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // Down once: Both -> Odd.
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.lines()[0], ".oh My Title");
+        assert_eq!(app.textarea.lines()[1], "Body text");
+    }
+
+    #[test]
+    fn page_break_inserts_dot_command() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("para");
+        app.insert_dot_command(".pa", "Page break inserted.");
+        assert!(app.textarea.lines().iter().any(|l| l == ".pa"));
+        assert!(app.modified);
+    }
+
+    #[test]
+    fn header_dialog_cancels_without_inserting() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Body");
+        app.start_header(HeaderKind::Footer);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.lines(), ["Body"]);
+    }
+
+    #[test]
+    fn menu_submenu_opens_and_runs_leaf() {
+        use crate::commands::Command;
+        use crate::menu::Activation;
+        let mut app = App::new(None).unwrap();
+        app.open_menu();
+        // Jump to the Layout menu and find the Headers/Footers submenu item.
+        assert!(app.menu.jump_to_title('l'));
+        while app.menu.submenu_items().is_none() {
+            app.menu.next_item();
+        }
+        // Right opens the submenu; first leaf is "Header...".
+        app.menu.move_right();
+        assert!(app.menu.sub_open);
+        match app.menu.activate() {
+            Activation::Run(Command::Header) => {}
+            other => panic!("expected Header command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_implemented_menu_item_beeps_with_status() {
+        let mut app = App::new(None).unwrap();
+        app.not_implemented("Printing");
+        assert!(
+            app.status_msg.as_deref().unwrap().contains("Printing"),
+            "status: {:?}",
+            app.status_msg
+        );
     }
 }

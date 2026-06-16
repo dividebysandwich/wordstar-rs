@@ -102,7 +102,7 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'k' => {
             *state = ChordState::K;
             Resolution::Pending(
-                "^K  Block & files:  S)ave  D)one  X)exit  Q)uit  P)df  B/K/C/V/Y block",
+                "^K  Block & files:  S)ave  X)exit  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y block",
             )
         }
         'q' => {
@@ -159,6 +159,8 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('v') => Resolution::Command(BlockMove),
         Some('y') => Resolution::Command(BlockDelete),
         Some('h') => Resolution::Command(BlockHide),
+        Some('r') => Resolution::Command(InsertFile),
+        Some('?') => Resolution::Command(WordCount),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }

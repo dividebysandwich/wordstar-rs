@@ -12,11 +12,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 /// Render markdown source into styled lines.
+///
+/// WordStar dot commands (`.he`, `.pa`, …) are print directives, not body text,
+/// so they are dropped before rendering rather than shown verbatim.
 pub fn render(source: &str) -> Vec<Line<'static>> {
+    let filtered: String = source
+        .lines()
+        .filter(|l| !is_dot_command(l))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut r = Renderer::default();
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(source, options) {
+    for event in Parser::new_ext(&filtered, options) {
         r.handle(event);
     }
     r.flush_line();
@@ -24,6 +32,12 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
         r.lines.push(Line::default());
     }
     r.lines
+}
+
+/// True for a WordStar dot command (a `.` at column 1 followed by a letter).
+fn is_dot_command(line: &str) -> bool {
+    let mut chars = line.chars();
+    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 #[derive(Default)]
@@ -452,5 +466,13 @@ mod tests {
         let out = flat(&render("See [the site](https://example.com)."));
         assert!(out.contains("the site"), "link text missing:\n{out}");
         assert!(out.contains("https://example.com"), "url missing");
+    }
+
+    #[test]
+    fn dot_commands_are_dropped() {
+        let out = flat(&render(".he My Header\n.pa\n\nReal body text"));
+        assert!(out.contains("Real body text"), "body missing:\n{out}");
+        assert!(!out.contains("My Header"), "dot command leaked:\n{out}");
+        assert!(!out.contains(".pa"), "dot command leaked:\n{out}");
     }
 }

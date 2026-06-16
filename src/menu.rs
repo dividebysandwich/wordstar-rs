@@ -1,8 +1,9 @@
 //! The pull-down menu model and its navigation state.
 //!
 //! The menu tree is static data; selecting an item yields a [`Command`] that the
-//! usual dispatcher executes. Titles mirror WordStar's bar (File / Edit / View /
-//! Insert / Style / Layout / Utilities / Help).
+//! usual dispatcher executes. Titles and layout mirror WordStar 7's bar (File /
+//! Edit / View / Insert / Style / Layout / Utilities / Help), including the
+//! nested submenus WordStar shows with a `▶` marker.
 
 use crate::commands::Command;
 
@@ -18,6 +19,8 @@ pub struct MenuItem {
 pub enum MenuAction {
     /// Run a command and close the menu.
     Run(Command),
+    /// Open a nested submenu.
+    Submenu(&'static [MenuItem]),
     /// A non-selectable divider.
     Separator,
 }
@@ -36,6 +39,24 @@ const fn item(label: &'static str, shortcut: &'static str, cmd: Command) -> Menu
     }
 }
 
+/// An item that opens a submenu.
+const fn sub(label: &'static str, items: &'static [MenuItem]) -> MenuItem {
+    MenuItem {
+        label,
+        shortcut: "",
+        action: MenuAction::Submenu(items),
+    }
+}
+
+/// An item that is shown for fidelity but not yet implemented.
+const fn todo(label: &'static str, shortcut: &'static str, feature: &'static str) -> MenuItem {
+    MenuItem {
+        label,
+        shortcut,
+        action: MenuAction::Run(Command::NotImplemented(feature)),
+    }
+}
+
 const SEP: MenuItem = MenuItem {
     label: "",
     shortcut: "",
@@ -43,59 +64,83 @@ const SEP: MenuItem = MenuItem {
 };
 
 static FILE: &[MenuItem] = &[
-    item("New", "", Command::New),
-    item("Open...", "F3", Command::OpenBrowser),
+    item("Open/Switch...", "^OK / F3", Command::OpenBrowser),
+    item("Close", "", Command::New),
     SEP,
     item("Save", "^KS / F2", Command::Save),
-    item("Save As...", "", Command::SaveAs),
-    item("Save & Exit", "^KX", Command::SaveExit),
+    item("Save As...", "^KT", Command::SaveAs),
+    item("Save and Close", "^KD", Command::SaveExit),
     SEP,
-    item("Export PDF...", "^KP", Command::ExportPdf),
+    todo("Print...", "^KP", "Printing"),
+    item("Export PDF...", "", Command::ExportPdf),
     SEP,
-    item("Exit", "^KQ / F10", Command::Quit),
+    item("Exit WordStar", "^KQX / F10", Command::Quit),
 ];
 
 static EDIT: &[MenuItem] = &[
     item("Undo", "^U", Command::Undo),
     SEP,
-    item("Mark Block Begin", "^KB", Command::BlockBegin),
+    item("Mark Block Beginning", "^KB", Command::BlockBegin),
     item("Mark Block End", "^KK", Command::BlockEnd),
-    item("Copy Block", "^KC", Command::BlockCopy),
-    item("Cut Block", "^KY", Command::BlockDelete),
-    item("Paste Block", "^KV", Command::BlockMove),
+    item("Copy", "^KC", Command::BlockCopy),
+    item("Move", "^KV", Command::BlockMove),
+    item("Delete", "^KY", Command::BlockDelete),
+    SEP,
+    item("Find...", "^QF", Command::Find),
+    item("Find and Replace...", "^QA", Command::Replace),
+    item("Next Find", "^L", Command::FindNext),
+    item("Go to Page...", "^QI", Command::GoToPage),
 ];
 
 static VIEW: &[MenuItem] = &[
-    item("Preview", "F5", Command::TogglePreview),
+    item("Preview", "^OP / F5", Command::TogglePreview),
+    SEP,
+    item("Command Tags", "^OD", Command::ToggleMarkup),
+    item("Block Highlighting", "^KH", Command::BlockHide),
     item("Word Wrap", "^OW", Command::ToggleWrap),
     SEP,
     item("Insert / Overtype", "^V", Command::ToggleInsert),
 ];
 
 static INSERT: &[MenuItem] = &[
-    item("Bold", "^PB", Command::InsertBold),
-    item("Italic", "^PY", Command::InsertItalic),
-    item("Underline", "^PS", Command::InsertUnderline),
+    item("Page Break", ".pa", Command::PageBreak),
+    item("Column Break", ".cb", Command::ColumnBreak),
+    SEP,
+    item("File...", "^KR", Command::InsertFile),
 ];
 
 static STYLE: &[MenuItem] = &[
-    item("Font...", "", Command::FontPrompt),
+    item("Bold", "^PB", Command::InsertBold),
+    item("Italic", "^PY", Command::InsertItalic),
+    item("Underline", "^PS", Command::InsertUnderline),
+    item("Strikeout", "^PX", Command::InsertStrike),
+    item("Font...", "^P=", Command::FontPrompt),
     item("Font Size...", "", Command::SizePrompt),
     SEP,
     item("Clear Formatting", "", Command::ClearFormat),
 ];
 
+static HEADERS_FOOTERS: &[MenuItem] = &[
+    item("Header...", "", Command::Header),
+    item("Footer...", "", Command::Footer),
+];
+
 static LAYOUT: &[MenuItem] = &[
-    item("Align Left", "", Command::AlignLeft),
-    item("Align Center", "", Command::AlignCenter),
-    item("Align Right", "", Command::AlignRight),
-    item("Justify", "", Command::AlignJustify),
+    item("Center Line", "^OC", Command::AlignCenter),
+    item("Right Align Line", "^OJ", Command::AlignRight),
+    item("Left Align Line", "^OL", Command::AlignLeft),
+    item("Justify", "^OS", Command::AlignJustify),
+    SEP,
+    sub("Headers/Footers", HEADERS_FOOTERS),
 ];
 
 static UTILITIES: &[MenuItem] = &[
-    item("Find...", "^QF", Command::Find),
-    item("Replace...", "^QA", Command::Replace),
-    item("Find Next", "^L", Command::FindNext),
+    item("Word Count", "^K?", Command::WordCount),
+    SEP,
+    todo("Spelling Check", "^QL", "Spelling check"),
+    todo("Thesaurus...", "^QJ", "Thesaurus"),
+    todo("Calculator", "^QM", "Calculator"),
+    todo("Sort Block", "", "Sort block"),
 ];
 
 static HELP: &[MenuItem] = &[
@@ -142,13 +187,36 @@ pub static MENUS: &[Menu] = &[
 /// Index of the Help menu (rendered right-aligned in the bar).
 pub const HELP_INDEX: usize = MENUS.len() - 1;
 
-/// Navigation state for an open menu.
+/// First non-separator index in a list of items.
+fn first_selectable(items: &[MenuItem]) -> usize {
+    items
+        .iter()
+        .position(|it| !matches!(it.action, MenuAction::Separator))
+        .unwrap_or(0)
+}
+
+/// Navigation state for an open menu (one level of submenu nesting).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MenuState {
     /// Selected top-level menu.
     pub menu: usize,
     /// Selected item within the open menu.
     pub item: usize,
+    /// Whether the highlighted item's submenu is open.
+    pub sub_open: bool,
+    /// Selected item within the open submenu.
+    pub sub_item: usize,
+}
+
+/// What activating the current selection does.
+#[derive(Debug)]
+pub enum Activation {
+    /// Run this command and close the menu.
+    Run(Command),
+    /// A submenu was opened; stay in the menu.
+    OpenedSubmenu,
+    /// Nothing actionable (e.g. a separator).
+    None,
 }
 
 impl MenuState {
@@ -156,54 +224,133 @@ impl MenuState {
         MENUS[self.menu].items
     }
 
+    /// The submenu items of the highlighted top-level item, if it is a submenu.
+    pub fn submenu_items(&self) -> Option<&'static [MenuItem]> {
+        match self.items().get(self.item)?.action {
+            MenuAction::Submenu(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// The items of whichever level currently has focus.
+    fn active_items(&self) -> &'static [MenuItem] {
+        if self.sub_open {
+            self.submenu_items().unwrap_or(self.items())
+        } else {
+            self.items()
+        }
+    }
+
+    fn active_index(&self) -> usize {
+        if self.sub_open {
+            self.sub_item
+        } else {
+            self.item
+        }
+    }
+
     /// Move to the previous menu (wraps), selecting its first real item.
     pub fn prev_menu(&mut self) {
         self.menu = (self.menu + MENUS.len() - 1) % MENUS.len();
-        self.item = self.first_selectable();
+        self.reset_items();
     }
 
     /// Move to the next menu (wraps).
     pub fn next_menu(&mut self) {
         self.menu = (self.menu + 1) % MENUS.len();
-        self.item = self.first_selectable();
+        self.reset_items();
     }
 
-    /// Move the highlight up, skipping separators (wraps within the menu).
+    fn reset_items(&mut self) {
+        self.sub_open = false;
+        self.sub_item = 0;
+        self.item = first_selectable(self.items());
+    }
+
+    /// Move the highlight up, skipping separators (wraps within the level).
     pub fn prev_item(&mut self) {
-        let n = self.items().len();
-        for _ in 0..n {
-            self.item = (self.item + n - 1) % n;
-            if !self.is_separator(self.item) {
-                break;
-            }
-        }
+        self.step_item(false);
     }
 
-    /// Move the highlight down, skipping separators (wraps within the menu).
+    /// Move the highlight down, skipping separators (wraps within the level).
     pub fn next_item(&mut self) {
-        let n = self.items().len();
+        self.step_item(true);
+    }
+
+    fn step_item(&mut self, forward: bool) {
+        let items = self.active_items();
+        let n = items.len();
+        if n == 0 {
+            return;
+        }
+        // Wrap-safe step: +1 forward, or +(n-1) ≡ -1 backward, all within `n`.
+        let delta = if forward { 1 } else { n - 1 };
+        let mut idx = self.active_index();
         for _ in 0..n {
-            self.item = (self.item + 1) % n;
-            if !self.is_separator(self.item) {
+            idx = (idx + delta) % n;
+            if !matches!(items[idx].action, MenuAction::Separator) {
                 break;
             }
         }
-    }
-
-    /// The command for the currently highlighted item, if selectable.
-    pub fn selected_command(&self) -> Option<Command> {
-        match &self.items().get(self.item)?.action {
-            MenuAction::Run(cmd) => Some(cmd.clone()),
-            MenuAction::Separator => None,
+        if self.sub_open {
+            self.sub_item = idx;
+        } else {
+            self.item = idx;
         }
     }
 
-    /// Select a menu by index (e.g. from a mouse click), highlighting its first
-    /// selectable item.
+    /// Right arrow: open the highlighted submenu, else move to the next menu.
+    pub fn move_right(&mut self) {
+        if !self.sub_open && self.submenu_items().is_some() {
+            self.open_submenu();
+        } else {
+            self.next_menu();
+        }
+    }
+
+    /// Left arrow: close an open submenu, else move to the previous menu.
+    pub fn move_left(&mut self) {
+        if self.sub_open {
+            self.sub_open = false;
+        } else {
+            self.prev_menu();
+        }
+    }
+
+    fn open_submenu(&mut self) {
+        if let Some(items) = self.submenu_items() {
+            self.sub_open = true;
+            self.sub_item = first_selectable(items);
+        }
+    }
+
+    /// Activate the current selection (Enter / click).
+    pub fn activate(&mut self) -> Activation {
+        if self.sub_open {
+            return match self.submenu_items().and_then(|its| its.get(self.sub_item)) {
+                Some(it) => match &it.action {
+                    MenuAction::Run(cmd) => Activation::Run(cmd.clone()),
+                    _ => Activation::None,
+                },
+                None => Activation::None,
+            };
+        }
+        match self.items().get(self.item).map(|it| &it.action) {
+            Some(MenuAction::Run(cmd)) => Activation::Run(cmd.clone()),
+            Some(MenuAction::Submenu(_)) => {
+                self.open_submenu();
+                Activation::OpenedSubmenu
+            }
+            _ => Activation::None,
+        }
+    }
+
+    /// Select a top-level menu by index (e.g. from a mouse click), highlighting
+    /// its first selectable item.
     pub fn select_menu(&mut self, idx: usize) {
         if idx < MENUS.len() {
             self.menu = idx;
-            self.item = self.first_selectable();
+            self.reset_items();
         }
     }
 
@@ -213,22 +360,68 @@ impl MenuState {
         for (i, m) in MENUS.iter().enumerate() {
             if m.title.chars().next().map(|c| c.to_ascii_lowercase()) == Some(letter) {
                 self.menu = i;
-                self.item = self.first_selectable();
+                self.reset_items();
                 return true;
             }
         }
         false
     }
+}
 
-    fn first_selectable(&self) -> usize {
-        MENUS[self.menu]
-            .items
-            .iter()
-            .position(|it| !matches!(it.action, MenuAction::Separator))
-            .unwrap_or(0)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn item_navigation_wraps_without_overflow() {
+        // Every menu (and submenu) must navigate up and down without panicking,
+        // and must skip separators landing only on real items.
+        for menu in 0..MENUS.len() {
+            let mut st = MenuState::default();
+            st.select_menu(menu);
+
+            for levels in [false, true] {
+                if levels {
+                    // Open a submenu if this menu has one, else skip the sub level.
+                    while st.submenu_items().is_none() && !st.sub_open {
+                        let before = st.item;
+                        st.next_item();
+                        if st.item == before {
+                            break;
+                        }
+                    }
+                    if st.submenu_items().is_some() {
+                        st.move_right();
+                    } else {
+                        continue;
+                    }
+                }
+
+                let items = if st.sub_open {
+                    st.submenu_items().unwrap()
+                } else {
+                    MENUS[menu].items
+                };
+                // Walk down and up more than a full cycle; never a separator.
+                for _ in 0..items.len() * 2 + 3 {
+                    st.prev_item(); // was the overflow path
+                    assert!(!matches!(
+                        items[st.active_index_pub()].action,
+                        MenuAction::Separator
+                    ));
+                    st.next_item();
+                    assert!(!matches!(
+                        items[st.active_index_pub()].action,
+                        MenuAction::Separator
+                    ));
+                }
+            }
+        }
     }
 
-    fn is_separator(&self, idx: usize) -> bool {
-        matches!(self.items()[idx].action, MenuAction::Separator)
+    impl MenuState {
+        fn active_index_pub(&self) -> usize {
+            if self.sub_open { self.sub_item } else { self.item }
+        }
     }
 }

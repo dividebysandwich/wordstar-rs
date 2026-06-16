@@ -53,6 +53,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Browser => browser_overlay(frame, area, app),
         Mode::Preview => preview_overlay(frame, area, app),
         Mode::Help => help_overlay(frame, area, app),
+        Mode::Info => info_overlay(frame, area, app),
+        Mode::Header => header_overlay(frame, area, app),
     }
 }
 
@@ -256,6 +258,88 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
             .style(theme::status_bar()),
         inner,
     );
+}
+
+/// A centered, dismissable information modal (e.g. Word Count).
+fn info_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(info) = app.info.as_ref() else {
+        return;
+    };
+    let content_w = info
+        .lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(info.title.chars().count())
+        .max(20);
+    let width = (content_w + 4).min(area.width as usize) as u16;
+    let height = (info.lines.len() + 4).min(area.height as usize) as u16;
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", info.title))
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let mut body: Vec<Line> = info.lines.iter().map(|l| Line::from(l.clone())).collect();
+    body.push(Line::default());
+    body.push(Line::from(Span::styled(
+        "Press any key to close",
+        Style::default().fg(ratatui::style::Color::DarkGray),
+    )));
+    frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
+}
+
+/// The header / footer dialog (text line + odd/even/both selection).
+fn header_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    use crate::app::{HeaderKind, HeaderPages};
+    let Some(h) = app.header_dialog.as_ref() else {
+        return;
+    };
+    let title = match h.kind {
+        HeaderKind::Header => " Header ",
+        HeaderKind::Footer => " Footer ",
+    };
+    let rect = centered(area, 54, 9);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let radio = |label: &str, on: bool| {
+        let mark = if on { "(•)" } else { "( )" };
+        Span::styled(
+            format!("{mark} {label}   "),
+            if on { bold } else { Style::default() },
+        )
+    };
+    let body = vec![
+        Line::from(vec![
+            Span::styled("Line: ", bold),
+            Span::raw(h.text.clone()),
+            Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]),
+        Line::default(),
+        Line::from(vec![Span::styled("For pages:  ", bold)]),
+        Line::from(vec![
+            radio("Both", h.pages == HeaderPages::Both),
+            radio("Odd", h.pages == HeaderPages::Odd),
+            radio("Even", h.pages == HeaderPages::Even),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            "↑/↓ pages · Enter = OK · Esc = Cancel",
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
 }
 
 /// A centered modal showing graphical-preview rasterization progress.
@@ -560,23 +644,61 @@ fn menu_dropdown(frame: &mut Frame, area: Rect, app: &App) {
     let sel = app.menu.menu;
     let menu = &menu::MENUS[sel];
 
-    // Panel width from the widest "label    shortcut" row.
-    let mut content_w = 0usize;
-    for it in menu.items {
-        let w = it.label.chars().count() + it.shortcut.chars().count() + 4;
-        content_w = content_w.max(w);
-    }
-    let width = (content_w as u16 + 2).min(area.width); // +2 for borders
-    let height = (menu.items.len() as u16 + 2).min(area.height);
-
     let anchors = menu_anchors(area.width);
     let mut x = anchors[sel];
+    let width = panel_width(menu.items, area.width);
     if x + width > area.width {
         x = area.width.saturating_sub(width);
     }
     let y = 2u16; // just below the menu bar (title row 0, menu row 1)
-    let rect = Rect::new(x, y, width, height).intersection(area);
+    let rect = Rect::new(x, y, width, area.height).intersection(area);
+    let rect = render_menu_panel(frame, rect, menu.items, app.menu.item, area);
     app.dropdown_area.set(rect);
+
+    // The open submenu, anchored to the right of its parent item's row.
+    if app.menu.sub_open
+        && let Some(items) = app.menu.submenu_items()
+    {
+        let sub_w = panel_width(items, area.width);
+        let mut sx = rect.x + rect.width;
+        if sx + sub_w > area.width {
+            sx = rect.x.saturating_sub(sub_w); // flip to the left edge
+        }
+        let sy = (rect.y + 1 + app.menu.item as u16).min(area.height.saturating_sub(1));
+        let srect = Rect::new(sx, sy, sub_w, area.height.saturating_sub(sy)).intersection(area);
+        let srect = render_menu_panel(frame, srect, items, app.menu.sub_item, area);
+        app.sub_dropdown_area.set(srect);
+    } else {
+        app.sub_dropdown_area.set(Rect::ZERO);
+    }
+}
+
+/// Width of a drop-down panel from the widest "label  shortcut" row (a submenu
+/// item reserves space for the `▶` marker).
+fn panel_width(items: &[menu::MenuItem], max: u16) -> u16 {
+    let mut content_w = 0usize;
+    for it in items {
+        let extra = if matches!(it.action, menu::MenuAction::Submenu(_)) {
+            2
+        } else {
+            0
+        };
+        let w = it.label.chars().count() + it.shortcut.chars().count() + 4 + extra;
+        content_w = content_w.max(w);
+    }
+    (content_w as u16 + 2).min(max)
+}
+
+/// Render one drop-down panel and return its (clamped) rectangle.
+fn render_menu_panel(
+    frame: &mut Frame,
+    rect: Rect,
+    items: &[menu::MenuItem],
+    selected: usize,
+    area: Rect,
+) -> Rect {
+    let height = (items.len() as u16 + 2).min(area.height);
+    let rect = Rect { height, ..rect }.intersection(area);
 
     frame.render_widget(Clear, rect);
     let block = Block::default()
@@ -586,8 +708,8 @@ fn menu_dropdown(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(block, rect);
 
     let item_w = inner.width as usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(menu.items.len());
-    for (i, it) in menu.items.iter().enumerate() {
+    let mut lines: Vec<Line> = Vec::with_capacity(items.len());
+    for (i, it) in items.iter().enumerate() {
         if matches!(it.action, menu::MenuAction::Separator) {
             lines.push(Line::from(Span::styled(
                 "─".repeat(item_w),
@@ -595,9 +717,15 @@ fn menu_dropdown(frame: &mut Frame, area: Rect, app: &App) {
             )));
             continue;
         }
-        let pad = item_w.saturating_sub(it.label.chars().count() + it.shortcut.chars().count() + 2);
-        let text = format!(" {}{}{} ", it.label, " ".repeat(pad), it.shortcut);
-        let style = if i == app.menu.item {
+        // Submenu items show a right-pointing marker instead of a shortcut.
+        let right = if matches!(it.action, menu::MenuAction::Submenu(_)) {
+            "▶".to_string()
+        } else {
+            it.shortcut.to_string()
+        };
+        let pad = item_w.saturating_sub(it.label.chars().count() + right.chars().count() + 2);
+        let text = format!(" {}{}{} ", it.label, " ".repeat(pad), right);
+        let style = if i == selected {
             theme::menu_panel_selected()
         } else {
             theme::menu_panel()
@@ -605,6 +733,7 @@ fn menu_dropdown(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled(text, style)));
     }
     frame.render_widget(Paragraph::new(lines).style(theme::menu_panel()), inner);
+    rect
 }
 
 fn style_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -825,8 +954,59 @@ mod tests {
         app.menu.next_menu(); // File -> Edit
         let screen = render_app(&app, 80, 16);
         assert!(screen.contains("Undo"), "menu item missing:\n{screen}");
-        assert!(screen.contains("Copy Block"), "block item missing");
+        assert!(
+            screen.contains("Mark Block Beginning"),
+            "block item missing"
+        );
         assert!(screen.contains("^KC"), "shortcut hint missing");
+    }
+
+    #[test]
+    fn submenu_renders_marker_and_panel() {
+        let mut app = App::new(None).unwrap();
+        app.open_menu();
+        assert!(app.menu.jump_to_title('l')); // Layout
+        let screen = render_app(&app, 80, 20);
+        assert!(
+            screen.contains("Headers/Footers"),
+            "submenu parent missing:\n{screen}"
+        );
+        assert!(screen.contains("▶"), "submenu marker missing:\n{screen}");
+
+        // Open the submenu and confirm the second panel shows its leaves.
+        while app.menu.submenu_items().is_none() {
+            app.menu.next_item();
+        }
+        app.menu.move_right();
+        let screen = render_app(&app, 80, 20);
+        assert!(
+            screen.contains("Header..."),
+            "submenu leaf missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("Footer..."),
+            "submenu leaf missing:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn header_dialog_overlay_renders() {
+        let mut app = App::new(None).unwrap();
+        app.start_header(crate::app::HeaderKind::Header);
+        let screen = render_app(&app, 80, 20);
+        assert!(screen.contains("Header"), "title missing:\n{screen}");
+        assert!(screen.contains("For pages"), "pages row missing:\n{screen}");
+        assert!(screen.contains("Both"), "radio missing:\n{screen}");
+    }
+
+    #[test]
+    fn word_count_modal_renders() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("hello world");
+        app.show_word_count();
+        let screen = render_app(&app, 80, 20);
+        assert!(screen.contains("Word Count"), "title missing:\n{screen}");
+        assert!(screen.contains("Words:"), "stat missing:\n{screen}");
     }
 
     #[test]

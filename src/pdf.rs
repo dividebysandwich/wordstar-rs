@@ -106,12 +106,24 @@ pub(crate) fn strip_frontmatter(src: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn parse(src: &str) -> Vec<Block> {
+    // Drop WordStar dot commands (print directives, not body text).
+    let src: String = src
+        .lines()
+        .filter(|l| !is_dot_command(l))
+        .collect::<Vec<_>>()
+        .join("\n");
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     let mut b = Builder::default();
-    for event in Parser::new_ext(src, opts) {
+    for event in Parser::new_ext(&src, opts) {
         b.handle(event);
     }
     b.blocks
+}
+
+/// True for a WordStar dot command (a `.` at column 1 followed by a letter).
+fn is_dot_command(line: &str) -> bool {
+    let mut chars = line.chars();
+    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 #[derive(Default)]

@@ -108,6 +108,26 @@ pub enum Command {
     AlignCenter,
     AlignRight,
     AlignJustify,
+
+    // --- insertion / utilities ---
+    /// Insert the contents of another file at the cursor (^KR).
+    InsertFile,
+    /// Insert a page-break dot command (`.pa`).
+    PageBreak,
+    /// Insert a column-break dot command (`.cb`).
+    ColumnBreak,
+    /// Open the Header dialog (Layout ▸ Headers/Footers ▸ Header).
+    Header,
+    /// Open the Footer dialog (Layout ▸ Headers/Footers ▸ Footer).
+    Footer,
+    /// Show document statistics (^K?).
+    WordCount,
+    /// Jump to a page (prompt for a page number).
+    GoToPage,
+
+    /// A menu entry kept for fidelity but not yet implemented; the payload names
+    /// the feature for the status message.
+    NotImplemented(&'static str),
 }
 
 /// Apply a [`Command`] to the application state.
@@ -199,5 +219,15 @@ pub fn execute(app: &mut App, cmd: Command) {
         AlignCenter => app.set_align(AlignChoice::Center),
         AlignRight => app.set_align(AlignChoice::Right),
         AlignJustify => app.set_align(AlignChoice::Justify),
+
+        InsertFile => app.start_insert_file(),
+        PageBreak => app.insert_dot_command(".pa", "Page break inserted."),
+        ColumnBreak => app.insert_dot_command(".cb", "Column break inserted."),
+        Header => app.start_header(crate::app::HeaderKind::Header),
+        Footer => app.start_header(crate::app::HeaderKind::Footer),
+        WordCount => app.show_word_count(),
+        GoToPage => app.start_goto_page(),
+
+        NotImplemented(feature) => app.not_implemented(feature),
     }
 }
