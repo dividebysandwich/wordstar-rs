@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use ratatui_image::{Resize, StatefulImage};
+use ratatui_image::{FilterType, Resize, StatefulImage};
 
 use crate::app::{App, Mode};
 use crate::theme;
@@ -429,8 +429,10 @@ fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
         // Build/encode only what this view needs (cached per page; the zoom crop
         // is re-encoded only when the view changes). `Scale` (not `Fit`) so the
         // page/crop fills the pane — otherwise zooming only changes the region.
+        // `Lanczos3` (rather than the default nearest-neighbour) downsamples the
+        // high-resolution page with antialiasing, keeping the glyph edges smooth.
         app.ensure_preview(inner);
-        let image = StatefulImage::default().resize(Resize::Scale(None));
+        let image = StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3)));
         if app.preview_zoom <= 1.001 {
             let mut cache = app.preview_page_protocols.borrow_mut();
             if let Some(Some(state)) = cache.get_mut(app.preview_page) {
