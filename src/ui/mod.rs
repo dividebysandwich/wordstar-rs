@@ -119,15 +119,26 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let key = Style::default()
         .fg(ratatui::style::Color::Blue)
         .add_modifier(Modifier::BOLD);
-    let body = vec![
-        Line::from(Span::raw(c.message.clone())),
-        Line::default(),
-        Line::from(vec![
+    let options = match c.action {
+        crate::app::ConfirmAction::SaveBeforeQuit => vec![
+            Span::styled("Y", key),
+            Span::raw(")es save     "),
+            Span::styled("N", key),
+            Span::raw(")o discard     "),
+            Span::styled("Esc", key),
+            Span::raw(" cancel"),
+        ],
+        _ => vec![
             Span::styled("Y", key),
             Span::raw(")es     "),
             Span::styled("N", key),
             Span::raw(")o     (Esc cancels)"),
-        ]),
+        ],
+    };
+    let body = vec![
+        Line::from(Span::raw(c.message.clone())),
+        Line::default(),
+        Line::from(options),
     ];
     frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
 }
@@ -156,7 +167,9 @@ fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
 
     if graphical {
         if let Some(state) = app.preview_protocol.borrow_mut().as_mut() {
-            let image = StatefulImage::default().resize(Resize::Fit(None));
+            // `Scale` (not `Fit`) so the page/crop is scaled up to fill the pane —
+            // otherwise zooming would only change the visible region, not the size.
+            let image = StatefulImage::default().resize(Resize::Scale(None));
             frame.render_stateful_widget(image, inner, state);
         }
     } else {

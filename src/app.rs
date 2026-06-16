@@ -62,6 +62,8 @@ pub enum PromptKind {
 pub enum ConfirmAction {
     /// Overwrite an existing file with the exported PDF.
     OverwritePdf(PathBuf),
+    /// Quitting with unsaved changes: save / discard / cancel.
+    SaveBeforeQuit,
 }
 
 /// State backing the [`Mode::Confirm`] modal.
@@ -110,8 +112,6 @@ pub struct App {
     pub chord: ChordState,
     /// Transient message shown on the status line (cleared on next key).
     pub status_msg: Option<String>,
-    /// True once the user has been warned about discarding unsaved changes.
-    quit_confirmed: bool,
     /// Active prompt overlay state (meaningful when `mode == Prompt`).
     pub prompt: PromptState,
     /// Active confirmation modal (present when `mode == Confirm`).
@@ -179,7 +179,6 @@ impl App {
             insert_mode: true,
             chord: ChordState::default(),
             status_msg: None,
-            quit_confirmed: false,
             prompt: PromptState::default(),
             confirm: None,
             browser: None,
@@ -249,10 +248,7 @@ impl App {
         self.status_msg = None;
 
         match keymap::resolve(&mut self.chord, key) {
-            Resolution::Command(cmd) => {
-                self.quit_confirmed = self.quit_confirmed && cmd == crate::commands::Command::Quit;
-                commands::execute(self, cmd);
-            }
+            Resolution::Command(cmd) => commands::execute(self, cmd),
             Resolution::Pending(hint) => {
                 self.status_msg = Some(hint.to_string());
             }
@@ -260,10 +256,7 @@ impl App {
                 self.set_status("Unrecognized command.");
                 ring_bell();
             }
-            Resolution::PassThrough => {
-                self.quit_confirmed = false;
-                self.pass_to_editor(key);
-            }
+            Resolution::PassThrough => self.pass_to_editor(key),
         }
     }
 
@@ -1018,13 +1011,43 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) {
+        // The quit prompt is three-way (Save / Don't save / Cancel).
+        if matches!(
+            self.confirm.as_ref().map(|c| &c.action),
+            Some(ConfirmAction::SaveBeforeQuit)
+        ) {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.confirm = None;
+                    self.mode = Mode::Editor;
+                    self.save();
+                    // Quit only if the save actually succeeded (e.g. an untitled
+                    // document still needs a name; then we stay so nothing is lost).
+                    if !self.modified {
+                        self.should_quit = true;
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.confirm = None;
+                    self.should_quit = true; // discard changes and quit
+                }
+                KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => {
+                    self.confirm = None;
+                    self.mode = Mode::Editor;
+                    self.set_status("Quit cancelled.");
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // Generic yes/no confirmations (e.g. PDF overwrite).
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 let action = self.confirm.take().map(|c| c.action);
                 self.mode = Mode::Editor;
-                match action {
-                    Some(ConfirmAction::OverwritePdf(path)) => self.do_export_pdf(&path),
-                    None => {}
+                if let Some(ConfirmAction::OverwritePdf(path)) = action {
+                    self.do_export_pdf(&path);
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -1036,14 +1059,17 @@ impl App {
         }
     }
 
-    /// Quit, warning once if there are unsaved changes.
+    /// Quit, prompting to save first if there are unsaved changes.
     pub fn request_quit(&mut self) {
-        if self.modified && !self.quit_confirmed {
-            self.quit_confirmed = true;
-            self.set_status("Unsaved changes! ^KX to save & exit, or press quit again to discard.");
-            return;
+        if self.modified {
+            self.confirm = Some(ConfirmState {
+                message: format!("Save changes to {} before quitting?", self.file_name()),
+                action: ConfirmAction::SaveBeforeQuit,
+            });
+            self.mode = Mode::Confirm;
+        } else {
+            self.should_quit = true;
         }
-        self.should_quit = true;
     }
 
     /// Insert pasted text.
