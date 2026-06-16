@@ -12,7 +12,7 @@ browser, find-and-replace, and a live formatting preview when they want them.
 
 <img width="1230" height="516" alt="image" src="https://github.com/user-attachments/assets/bcc00785-db24-434e-a86c-c302fa126fd9" />
 
-<img width="1230" height="906" alt="image" src="https://github.com/user-attachments/assets/7eb95063-6de6-4d42-95b0-10c4a127aae7" />
+<img width="1007" height="692" alt="image" src="https://github.com/user-attachments/assets/db97e20f-303f-4c0c-9170-e02c99158038" />
 
 
 ---
