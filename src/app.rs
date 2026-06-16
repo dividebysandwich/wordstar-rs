@@ -5,7 +5,7 @@
 //! through here or through [`commands::execute`](crate::commands::execute).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -35,6 +35,8 @@ pub enum Mode {
     Menu,
     /// A single-line prompt overlay (find / replace / save-as) is open.
     Prompt,
+    /// A modal yes/no confirmation is open.
+    Confirm,
     /// The file browser is open.
     Browser,
     /// The read-only formatted preview is open.
@@ -52,6 +54,21 @@ pub enum PromptKind {
     SaveAs,
     Font,
     FontSize,
+    ExportPdf,
+}
+
+/// A pending action awaiting yes/no confirmation in [`Mode::Confirm`].
+#[derive(Debug, Clone)]
+pub enum ConfirmAction {
+    /// Overwrite an existing file with the exported PDF.
+    OverwritePdf(PathBuf),
+}
+
+/// State backing the [`Mode::Confirm`] modal.
+#[derive(Debug, Clone)]
+pub struct ConfirmState {
+    pub message: String,
+    pub action: ConfirmAction,
 }
 
 /// Paragraph alignment choice (Justify is tracked even though the widget
@@ -97,6 +114,8 @@ pub struct App {
     quit_confirmed: bool,
     /// Active prompt overlay state (meaningful when `mode == Prompt`).
     pub prompt: PromptState,
+    /// Active confirmation modal (present when `mode == Confirm`).
+    pub confirm: Option<ConfirmState>,
     /// Active file browser (present when `mode == Browser`).
     pub browser: Option<crate::browser::Browser>,
     /// Scroll offset for the preview overlay.
@@ -146,6 +165,7 @@ impl App {
             status_msg: None,
             quit_confirmed: false,
             prompt: PromptState::default(),
+            confirm: None,
             browser: None,
             preview_scroll: 0,
             help_scroll: 0,
@@ -193,6 +213,7 @@ impl App {
             Mode::Clean => self.handle_clean_key(key),
             Mode::Menu => self.handle_menu_key(key),
             Mode::Prompt => self.handle_prompt_key(key),
+            Mode::Confirm => self.handle_confirm_key(key),
             Mode::Browser => self.handle_browser_key(key),
             Mode::Preview => self.handle_overlay_key(key, OverlayKind::Preview),
             Mode::Help => self.handle_overlay_key(key, OverlayKind::Help),
@@ -379,6 +400,24 @@ impl App {
                 } else {
                     let close = format!("]{{font=\"{name}\"}}");
                     self.apply_format("[", &close, &format!("Font: {name}"));
+                }
+            }
+            PromptKind::ExportPdf => {
+                let name = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                if name.is_empty() {
+                    self.set_status("PDF export cancelled.");
+                    return;
+                }
+                let path = PathBuf::from(name);
+                if path.exists() {
+                    self.confirm = Some(ConfirmState {
+                        message: format!("{} already exists. Overwrite?", path.display()),
+                        action: ConfirmAction::OverwritePdf(path),
+                    });
+                    self.mode = Mode::Confirm;
+                } else {
+                    self.do_export_pdf(&path);
                 }
             }
             PromptKind::FontSize => {
@@ -806,19 +845,48 @@ impl App {
         }
     }
 
-    /// Export the document to a formatted PDF next to the source file.
-    pub fn export_pdf(&mut self) {
-        let Some(path) = self.path.clone() else {
-            self.set_status("Save the file first (^KS), then export to PDF.");
-            return;
+    /// Open the "Export PDF as:" filename prompt, pre-filled with a default.
+    pub fn start_export_pdf(&mut self) {
+        let default = match &self.path {
+            Some(p) => p.with_extension("pdf"),
+            None => PathBuf::from("untitled.pdf"),
         };
-        let pdf_path = path.with_extension("pdf");
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::ExportPdf,
+            label: "Export PDF as:".into(),
+            input: default.to_string_lossy().into_owned(),
+            pending_find: None,
+        };
+    }
+
+    /// Write the PDF to `path`, reporting success or failure on the status line.
+    fn do_export_pdf(&mut self, path: &Path) {
         let title = self.file_name();
         let markdown = self.textarea.lines().join("\n");
         let bytes = crate::pdf::export(&markdown, &title);
-        match fs::write(&pdf_path, bytes) {
-            Ok(()) => self.set_status(format!("Exported {}", pdf_path.display())),
+        match fs::write(path, bytes) {
+            Ok(()) => self.set_status(format!("Exported {}", path.display())),
             Err(e) => self.set_status(format!("PDF export failed: {e}")),
+        }
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                let action = self.confirm.take().map(|c| c.action);
+                self.mode = Mode::Editor;
+                match action {
+                    Some(ConfirmAction::OverwritePdf(path)) => self.do_export_pdf(&path),
+                    None => {}
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.confirm = None;
+                self.mode = Mode::Editor;
+                self.set_status("Cancelled.");
+            }
+            _ => {}
         }
     }
 
@@ -852,7 +920,7 @@ impl App {
             Mode::Browser => self.mouse_browser(me),
             Mode::Preview => self.mouse_scroll(me, OverlayKind::Preview),
             Mode::Help => self.mouse_scroll(me, OverlayKind::Help),
-            Mode::Prompt => {} // prompts are keyboard-only
+            Mode::Prompt | Mode::Confirm => {} // keyboard-only
         }
     }
 

@@ -52,6 +52,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Editor | Mode::Clean => {}
         Mode::Menu => menu_dropdown(frame, area, app),
         Mode::Prompt => prompt_overlay(frame, area, app),
+        Mode::Confirm => confirm_overlay(frame, area, app),
         Mode::Browser => browser_overlay(frame, area, app),
         Mode::Preview => preview_overlay(frame, area, app),
         Mode::Help => help_overlay(frame, area, app),
@@ -97,6 +98,36 @@ fn prompt_overlay(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme::status_bar()), inner);
+}
+
+fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(c) = app.confirm.as_ref() else {
+        return;
+    };
+    let width = (c.message.chars().count().max(28) + 4).min(area.width as usize) as u16;
+    let rect = centered(area, width, 5);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Confirm ")
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let key = Style::default()
+        .fg(ratatui::style::Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let body = vec![
+        Line::from(Span::raw(c.message.clone())),
+        Line::default(),
+        Line::from(vec![
+            Span::styled("Y", key),
+            Span::raw(")es     "),
+            Span::styled("N", key),
+            Span::raw(")o     (Esc cancels)"),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
 }
 
 fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
@@ -621,6 +652,24 @@ mod tests {
         });
         assert_eq!(app.mode, Mode::Menu);
         assert_eq!(app.menu.menu, 1); // Edit
+    }
+
+    #[test]
+    fn confirm_modal_renders_message() {
+        use crate::app::{ConfirmAction, ConfirmState};
+        let mut app = App::new(None).unwrap();
+        app.confirm = Some(ConfirmState {
+            message: "out.pdf already exists. Overwrite?".into(),
+            action: ConfirmAction::OverwritePdf(std::path::PathBuf::from("out.pdf")),
+        });
+        app.mode = Mode::Confirm;
+        let screen = render_app(&app, 80, 16);
+        assert!(screen.contains("Confirm"), "modal frame missing:\n{screen}");
+        assert!(screen.contains("Overwrite?"), "message missing");
+        assert!(
+            screen.contains(")es") && screen.contains(")o"),
+            "Y/N options missing"
+        );
     }
 }
 

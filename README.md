@@ -283,9 +283,11 @@ delete) just as a keyboard-marked block does.
 
 ## Exporting to PDF
 
-Press **`^KP`** (or **File → Export PDF…**) to write a formatted PDF next to your
-document — `chapter1.md` becomes `chapter1.pdf`. (Save the file first so it has a
-name.)
+Press **`^KP`** (or **File → Export PDF…**) to export. A dialog asks for the
+output file name, pre-filled with a sensible default (`chapter1.md` →
+`chapter1.pdf`); edit it as you like and press **Enter**, or **Esc** to cancel.
+If the chosen file already exists, a confirmation box appears first — press
+**Y** to overwrite or **N** (or **Esc**) to back out without touching it.
 
 The PDF is laid out on A4 pages with page numbers, and renders your formatting:
 headings, **bold**, *italic*, lists (bulleted, numbered, and task lists), block
