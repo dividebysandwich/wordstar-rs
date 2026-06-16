@@ -180,10 +180,17 @@ fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
     app.preview_area.set(inner);
 
     if graphical {
-        if let Some(state) = app.preview_protocol.borrow_mut().as_mut() {
-            // `Scale` (not `Fit`) so the page/crop is scaled up to fill the pane —
-            // otherwise zooming would only change the visible region, not the size.
-            let image = StatefulImage::default().resize(Resize::Scale(None));
+        // Build/encode only what this view needs (cached per page; the zoom crop
+        // is re-encoded only when the view changes). `Scale` (not `Fit`) so the
+        // page/crop fills the pane — otherwise zooming only changes the region.
+        app.ensure_preview(inner);
+        let image = StatefulImage::default().resize(Resize::Scale(None));
+        if app.preview_zoom <= 1.001 {
+            let mut cache = app.preview_page_protocols.borrow_mut();
+            if let Some(Some(state)) = cache.get_mut(app.preview_page) {
+                frame.render_stateful_widget(image, inner, state);
+            }
+        } else if let Some(state) = app.preview_zoom_protocol.borrow_mut().as_mut() {
             frame.render_stateful_widget(image, inner, state);
         }
     } else {

@@ -66,6 +66,10 @@ pub enum ConfirmAction {
     SaveBeforeQuit,
 }
 
+/// Identifies a zoomed preview view: `(page, zoom×1000, offx×1000, offy×1000,
+/// area_w, area_h)`. Used to skip re-encoding when the view hasn't changed.
+type PreviewViewKey = (usize, u32, i32, i32, u16, u16);
+
 /// State backing the [`Mode::Confirm`] modal.
 #[derive(Debug, Clone)]
 pub struct ConfirmState {
@@ -130,10 +134,15 @@ pub struct App {
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Whether a real graphics protocol (Kitty/iTerm2/Sixel) is available.
     pub graphics: bool,
-    /// The current encoded page image for the graphical preview, if active.
-    pub preview_protocol: RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
     /// Rasterized pages of the document (graphical preview).
     pub preview_pages: Vec<image::RgbaImage>,
+    /// Per-page encoded protocols, built lazily and reused (the zoom == 1 view).
+    pub preview_page_protocols: RefCell<Vec<Option<ratatui_image::protocol::StatefulProtocol>>>,
+    /// Encoded protocol for the current zoomed/panned crop (zoom > 1).
+    pub preview_zoom_protocol: RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
+    /// The view the zoom protocol was built for, so it is only re-encoded when
+    /// the view actually changes.
+    pub preview_view_key: Cell<Option<PreviewViewKey>>,
     /// Currently shown page index.
     pub preview_page: usize,
     /// Zoom factor (1.0 = whole page fit to the pane).
@@ -188,8 +197,10 @@ impl App {
             align: AlignChoice::Left,
             picker: None,
             graphics: false,
-            preview_protocol: RefCell::new(None),
             preview_pages: Vec::new(),
+            preview_page_protocols: RefCell::new(Vec::new()),
+            preview_zoom_protocol: RefCell::new(None),
+            preview_view_key: Cell::new(None),
             preview_page: 0,
             preview_zoom: 1.0,
             preview_off: (0.0, 0.0),
@@ -614,12 +625,14 @@ impl App {
             self.preview_zoom = 1.0;
             self.preview_off = (0.0, 0.0);
             self.preview_pages.clear();
-            *self.preview_protocol.borrow_mut() = None;
+            self.preview_page_protocols.borrow_mut().clear();
+            *self.preview_zoom_protocol.borrow_mut() = None;
+            self.preview_view_key.set(None);
             if self.graphics {
                 self.preview_pages = crate::gfx::render_pages(&self.textarea.lines().join("\n"));
-                if !self.preview_pages.is_empty() {
-                    self.rebuild_preview();
-                }
+                // One protocol slot per page, filled lazily on first display.
+                *self.preview_page_protocols.borrow_mut() =
+                    (0..self.preview_pages.len()).map(|_| None).collect();
             }
             self.mode = Mode::Preview;
         }
@@ -628,54 +641,83 @@ impl App {
     fn close_preview(&mut self) {
         self.mode = Mode::Editor;
         self.preview_pages.clear();
-        *self.preview_protocol.borrow_mut() = None;
+        self.preview_page_protocols.borrow_mut().clear();
+        *self.preview_zoom_protocol.borrow_mut() = None;
+        self.preview_view_key.set(None);
     }
 
-    /// Re-encode the current page (cropped for the current zoom/pan) for display.
-    fn rebuild_preview(&self) {
+    /// Ensure the protocol needed for the current view exists (building/encoding
+    /// it only when missing or when the zoomed view actually changed). Called
+    /// from the renderer, so navigation itself does no image work.
+    pub fn ensure_preview(&self, inner: Rect) {
         let Some(picker) = self.picker.as_ref() else {
             return;
         };
-        let Some(page) = self.preview_pages.get(self.preview_page) else {
-            *self.preview_protocol.borrow_mut() = None;
-            return;
-        };
-        let img = if self.preview_zoom <= 1.001 {
-            page.clone()
+        if self.preview_zoom <= 1.001 {
+            // Whole-page view: build this page's protocol once and reuse it.
+            let mut cache = self.preview_page_protocols.borrow_mut();
+            if let Some(slot) = cache.get_mut(self.preview_page)
+                && slot.is_none()
+                && let Some(page) = self.preview_pages.get(self.preview_page)
+            {
+                *slot =
+                    Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(page.clone())));
+            }
         } else {
-            // Crop a window sized to the pane's aspect ratio, magnified by zoom.
-            let area = self.preview_area.get();
-            let (fw, fh) = self
-                .picker
-                .as_ref()
-                .map(|p| {
-                    let f = p.font_size();
-                    (f.width.max(1) as f32, f.height.max(1) as f32)
-                })
-                .unwrap_or((8.0, 16.0));
-            let pane_w = (area.width as f32 * fw).max(1.0);
-            let pane_h = (area.height as f32 * fh).max(1.0);
-            let cw = (page.width() as f32 / self.preview_zoom)
-                .round()
-                .clamp(1.0, page.width() as f32);
-            let ch = (cw * pane_h / pane_w)
-                .round()
-                .clamp(1.0, page.height() as f32);
-            let max_x = page.width().saturating_sub(cw as u32);
-            let max_y = page.height().saturating_sub(ch as u32);
-            let x = (self.preview_off.0 * max_x as f32).round() as u32;
-            let y = (self.preview_off.1 * max_y as f32).round() as u32;
-            image::imageops::crop_imm(page, x, y, cw as u32, ch as u32).to_image()
-        };
-        *self.preview_protocol.borrow_mut() =
-            Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img)));
+            // Zoomed view: re-encode only when (page, zoom, pan, area) changes.
+            let key = self.zoom_view_key(inner);
+            if self.preview_view_key.get() != Some(key)
+                && let Some(img) = self.zoom_crop(inner)
+            {
+                *self.preview_zoom_protocol.borrow_mut() =
+                    Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img)));
+                self.preview_view_key.set(Some(key));
+            }
+        }
+    }
+
+    fn zoom_view_key(&self, inner: Rect) -> PreviewViewKey {
+        (
+            self.preview_page,
+            (self.preview_zoom * 1000.0) as u32,
+            (self.preview_off.0 * 1000.0) as i32,
+            (self.preview_off.1 * 1000.0) as i32,
+            inner.width,
+            inner.height,
+        )
+    }
+
+    /// Crop the current page to a window sized to the pane's aspect ratio,
+    /// magnified by the zoom factor and positioned by the pan offset.
+    fn zoom_crop(&self, inner: Rect) -> Option<image::RgbaImage> {
+        let page = self.preview_pages.get(self.preview_page)?;
+        let (fw, fh) = self
+            .picker
+            .as_ref()
+            .map(|p| {
+                let f = p.font_size();
+                (f.width.max(1) as f32, f.height.max(1) as f32)
+            })
+            .unwrap_or((8.0, 16.0));
+        let pane_w = (inner.width as f32 * fw).max(1.0);
+        let pane_h = (inner.height as f32 * fh).max(1.0);
+        let cw = (page.width() as f32 / self.preview_zoom)
+            .round()
+            .clamp(1.0, page.width() as f32);
+        let ch = (cw * pane_h / pane_w)
+            .round()
+            .clamp(1.0, page.height() as f32);
+        let max_x = page.width().saturating_sub(cw as u32);
+        let max_y = page.height().saturating_sub(ch as u32);
+        let x = (self.preview_off.0 * max_x as f32).round() as u32;
+        let y = (self.preview_off.1 * max_y as f32).round() as u32;
+        Some(image::imageops::crop_imm(page, x, y, cw as u32, ch as u32).to_image())
     }
 
     fn preview_set_page(&mut self, page: usize) {
         if page < self.preview_pages.len() && page != self.preview_page {
             self.preview_page = page;
             self.preview_off = (0.0, 0.0);
-            self.rebuild_preview();
         }
     }
 
@@ -686,14 +728,12 @@ impl App {
             if z <= 1.001 {
                 self.preview_off = (0.0, 0.0);
             }
-            self.rebuild_preview();
         }
     }
 
     fn preview_pan(&mut self, dx: f32, dy: f32) {
         self.preview_off.0 = (self.preview_off.0 + dx).clamp(0.0, 1.0);
         self.preview_off.1 = (self.preview_off.1 + dy).clamp(0.0, 1.0);
-        self.rebuild_preview();
     }
 
     /// Key handling for the preview: graphical pages (navigate/zoom/pan) or the
@@ -1392,4 +1432,59 @@ fn regex_escape(s: &str) -> String {
 fn ring_bell() {
     use std::io::Write;
     let _ = std::io::stdout().write_all(b"\x07");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgba, RgbaImage};
+    use ratatui_image::picker::Picker;
+
+    fn page(color: u8) -> RgbaImage {
+        RgbaImage::from_pixel(40, 60, Rgba([color, color, color, 255]))
+    }
+
+    #[test]
+    fn page_protocol_built_lazily_and_cached() {
+        let mut app = App::new(None).unwrap();
+        app.picker = Some(Picker::from_fontsize((10, 20).into()));
+        app.preview_pages = vec![page(255), page(0)];
+        *app.preview_page_protocols.borrow_mut() = vec![None, None];
+        app.preview_page = 0;
+        app.preview_zoom = 1.0;
+        let area = Rect::new(0, 0, 10, 8);
+
+        app.ensure_preview(area);
+        assert!(
+            app.preview_page_protocols.borrow()[0].is_some(),
+            "current page built"
+        );
+        assert!(
+            app.preview_page_protocols.borrow()[1].is_none(),
+            "other page untouched"
+        );
+
+        // Re-running for the same page must not rebuild a fresh protocol.
+        let ptr_before = app.preview_page_protocols.borrow()[0]
+            .as_ref()
+            .map(|p| p as *const _ as usize);
+        app.ensure_preview(area);
+        let ptr_after = app.preview_page_protocols.borrow()[0]
+            .as_ref()
+            .map(|p| p as *const _ as usize);
+        assert_eq!(ptr_before, ptr_after, "cached protocol reused, not rebuilt");
+    }
+
+    #[test]
+    fn zoom_view_key_distinguishes_views() {
+        let app = App::new(None).unwrap();
+        let area = Rect::new(0, 0, 10, 8);
+        let base = app.zoom_view_key(area);
+        let mut z = App::new(None).unwrap();
+        z.preview_zoom = 2.0;
+        assert_ne!(base, z.zoom_view_key(area), "zoom changes the key");
+        let mut p = App::new(None).unwrap();
+        p.preview_off = (0.5, 0.0);
+        assert_ne!(base, p.zoom_view_key(area), "pan changes the key");
+    }
 }
