@@ -13,7 +13,9 @@
 //!
 //! The result is Markdown so it slots straight into the editor.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io;
 use std::path::Path;
 
@@ -23,21 +25,31 @@ pub struct Loaded {
     pub imported: bool,
 }
 
+/// Decode already-read `bytes` into a document, deciding between the WordStar
+/// importer and plain UTF-8 text. `name` is only consulted for its extension.
+/// This is the platform-independent core shared by the native `load` and the
+/// browser file picker.
+pub fn load_bytes(name: &str, bytes: &[u8]) -> Loaded {
+    let path = Path::new(name);
+    if is_wordstar(path, bytes) {
+        Loaded {
+            text: decode(bytes),
+            imported: true,
+        }
+    } else {
+        Loaded {
+            text: String::from_utf8_lossy(bytes).into_owned(),
+            imported: false,
+        }
+    }
+}
+
 /// Read `path`, decoding it from WordStar if it looks like a WordStar file,
 /// otherwise reading it as UTF-8 text (lossily).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load(path: &Path) -> io::Result<Loaded> {
     let bytes = fs::read(path)?;
-    if is_wordstar(path, &bytes) {
-        Ok(Loaded {
-            text: decode(&bytes),
-            imported: true,
-        })
-    } else {
-        Ok(Loaded {
-            text: String::from_utf8_lossy(&bytes).into_owned(),
-            imported: false,
-        })
-    }
+    Ok(load_bytes(&path.to_string_lossy(), &bytes))
 }
 
 /// Heuristic: should `path` / `bytes` be imported as a WordStar document?

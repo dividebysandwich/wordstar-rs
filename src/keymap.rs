@@ -5,7 +5,7 @@
 //! here *before* handing anything unclaimed to the text widget, so the classic
 //! command set and modern amenities (arrows, function keys) coexist.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commands::Command;
 

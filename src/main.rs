@@ -1,29 +1,25 @@
-//! wordstar-rs — a faithful DOS WordStar 7 clone for the terminal.
+//! Native terminal entry point for wordstar-rs.
 //!
-//! Built on `ratatui` + `ratatui-textarea`. Edits markdown; will read original
-//! WordStar binary files in a later phase. See the project plan for the roadmap.
+//! The editor itself lives in the library crate (`lib.rs`); this binary only
+//! wires it to a real terminal via `ratatui` + `crossterm`. The browser build
+//! uses `wasm::start` instead, so on `wasm32` this file collapses to an empty
+//! `main` and pulls in none of the terminal stack.
 
-mod app;
-mod attributes;
-mod browser;
-mod commands;
-mod gfx;
-mod help;
-mod keymap;
-mod menu;
-mod pdf;
-mod preview;
-mod theme;
-mod ui;
-mod wordstar;
-mod wrap;
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::DefaultTerminal;
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::crossterm::event::{self, Event};
+#[cfg(not(target_arch = "wasm32"))]
+use wordstar_rs::app::App;
+#[cfg(not(target_arch = "wasm32"))]
+use wordstar_rs::ui;
 
-use app::App;
-
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<()> {
     let path = std::env::args().nth(1);
     let mut terminal = ratatui::init();
@@ -53,6 +49,7 @@ fn main() -> Result<()> {
 /// Heuristic: does the environment look like a terminal that supports an inline
 /// graphics protocol (Kitty / iTerm2 / Sixel)? Used to avoid the ~2s graphics
 /// capability query on terminals that would never answer it.
+#[cfg(not(target_arch = "wasm32"))]
 fn graphics_terminal_likely() -> bool {
     use std::env::var;
     if var("KITTY_WINDOW_ID").is_ok() || var("KONSOLE_VERSION").is_ok() {
@@ -74,6 +71,7 @@ fn graphics_terminal_likely() -> bool {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, &app))?;
@@ -92,6 +90,7 @@ fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn dispatch(app: &mut App, event: Event) {
     match event {
         Event::Key(key) => app.handle_key(key),

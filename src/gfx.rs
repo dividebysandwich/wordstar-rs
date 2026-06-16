@@ -9,7 +9,6 @@
 //! falls back to the text preview.
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
 
 use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
@@ -41,6 +40,41 @@ thread_local! {
     static CACHE: RefCell<SwashCache> = RefCell::new(SwashCache::new());
 }
 
+/// Build the shared font system. On native we use the host's installed fonts; in
+/// the browser there are none, so we register a bundled DejaVu set (sans / serif
+/// / mono, each with bold + italic) and point the generic families at them so
+/// `Family::SansSerif|Serif|Monospace` resolve.
+#[cfg(not(target_arch = "wasm32"))]
+fn new_font_system() -> FontSystem {
+    FontSystem::new()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn new_font_system() -> FontSystem {
+    let mut fs = FontSystem::new();
+    let db = fs.db_mut();
+    for data in [
+        include_bytes!("../assets/fonts/DejaVuSans.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSans-Oblique.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSans-BoldOblique.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSerif.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSerif-Bold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSerif-Italic.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSerif-BoldItalic.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSansMono.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSansMono-Oblique.ttf").as_slice(),
+        include_bytes!("../assets/fonts/DejaVuSansMono-BoldOblique.ttf").as_slice(),
+    ] {
+        db.load_font_data(data.to_vec());
+    }
+    db.set_sans_serif_family("DejaVu Sans");
+    db.set_serif_family("DejaVu Serif");
+    db.set_monospace_family("DejaVu Sans Mono");
+    fs
+}
+
 /// An incremental rasterization job: renders one block per `step` call (within a
 /// time budget) so the UI can show a progress modal for long documents.
 pub struct Job {
@@ -56,7 +90,7 @@ impl Job {
         let have_fonts = FONTS.with(|fonts| {
             let mut fonts = fonts.borrow_mut();
             if fonts.is_none() {
-                *fonts = Some(FontSystem::new());
+                *fonts = Some(new_font_system());
             }
             !fonts.as_ref().unwrap().db().is_empty()
         });
@@ -84,9 +118,9 @@ impl Job {
         self.next >= self.blocks.len()
     }
 
-    /// Rasterize blocks until `budget` elapses (at least one per call).
-    pub fn step(&mut self, budget: Duration) {
-        let start = Instant::now();
+    /// Rasterize blocks until `budget_ms` elapses (at least one per call).
+    pub fn step(&mut self, budget_ms: f64) {
+        let start = crate::platform::now_ms();
         FONTS.with(|fonts| {
             let mut fonts = fonts.borrow_mut();
             let fs = fonts.as_mut().unwrap();
@@ -96,7 +130,7 @@ impl Job {
                     let strip = build_strip(fs, &mut cache, &self.blocks[self.next]);
                     self.strips.push(strip);
                     self.next += 1;
-                    if start.elapsed() >= budget {
+                    if crate::platform::now_ms() - start >= budget_ms {
                         break;
                     }
                 }
@@ -434,7 +468,7 @@ mod tests {
             .collect::<String>();
         let pages = match Job::new(&md) {
             Some(mut job) => {
-                job.step(Duration::from_secs(60));
+                job.step(60_000.0);
                 job.finish()
             }
             None => return, // no system fonts in this environment

@@ -4,14 +4,17 @@
 //! current [`Mode`], the chord state, and transient status. All mutation flows
 //! through here or through [`commands::execute`](crate::commands::execute).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant};
+use std::cell::Cell;
+// `RefCell` only wraps the native image-protocol caches.
+#[cfg(not(target_arch = "wasm32"))]
+use std::cell::RefCell;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{
+use crate::input::{
     KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Alignment, Rect};
@@ -21,6 +24,16 @@ use crate::attributes::RunAttributes;
 use crate::commands;
 use crate::keymap::{self, ChordState, Resolution};
 use crate::theme;
+
+/// Derive a download filename from the document path, falling back to a generic
+/// name with the given extension when there is none (browser builds only).
+#[cfg(target_arch = "wasm32")]
+fn file_download_name(path: &Path, default_ext: &str) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("document.{default_ext}"))
+}
 
 /// Which screen / interaction the app is currently in. Drives both input
 /// routing and rendering so the two never drift apart.
@@ -163,7 +176,9 @@ pub struct App {
     pub info: Option<InfoState>,
     /// Active header/footer dialog (present when `mode == Header`).
     pub header_dialog: Option<HeaderState>,
-    /// Active file browser (present when `mode == Browser`).
+    /// Active file browser (present when `mode == Browser`). Native only — the
+    /// browser build opens files through the host's file picker.
+    #[cfg(not(target_arch = "wasm32"))]
     pub browser: Option<crate::browser::Browser>,
     /// Scroll offset for the preview overlay.
     pub preview_scroll: u16,
@@ -180,17 +195,22 @@ pub struct App {
     /// True while a block is being marked, so cursor movement extends the
     /// selection even with plain (un-shifted) movement keys.
     marking: bool,
-    /// Terminal graphics picker (set at startup when a TTY is available).
+    /// Terminal graphics picker (set at startup when a TTY is available). Native
+    /// only — the browser draws the preview to an HTML canvas instead.
+    #[cfg(not(target_arch = "wasm32"))]
     pub picker: Option<ratatui_image::picker::Picker>,
-    /// Whether a real graphics protocol (Kitty/iTerm2/Sixel) is available.
+    /// Whether a graphical (rather than text) preview is available: a real
+    /// terminal graphics protocol on native, always true in the browser canvas.
     pub graphics: bool,
     /// In-progress incremental rasterization job (graphical preview loading).
     pub preview_job: Option<crate::gfx::Job>,
     /// Rasterized pages of the document (graphical preview).
     pub preview_pages: Vec<image::RgbaImage>,
     /// Per-page encoded protocols, built lazily and reused (the zoom == 1 view).
+    #[cfg(not(target_arch = "wasm32"))]
     pub preview_page_protocols: RefCell<Vec<Option<ratatui_image::protocol::StatefulProtocol>>>,
     /// Encoded protocol for the current zoomed/panned crop (zoom > 1).
+    #[cfg(not(target_arch = "wasm32"))]
     pub preview_zoom_protocol: RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
     /// The view the zoom protocol was built for, so it is only re-encoded when
     /// the view actually changes.
@@ -206,7 +226,7 @@ pub struct App {
     /// True while a mouse drag is extending a selection in the editor.
     mouse_selecting: bool,
     /// Time + cell of the last mouse press, for double-click detection.
-    last_click: Option<(Instant, u16, u16)>,
+    last_click: Option<(f64, u16, u16)>,
     /// Screen geometry recorded during the last render, for mouse hit-testing.
     pub editor_area: Cell<Rect>,
     pub menu_bar_area: Cell<Rect>,
@@ -223,8 +243,12 @@ impl App {
     /// Build the app, optionally loading a file from `path`.
     pub fn new(path: Option<String>) -> Result<Self> {
         let path = path.map(PathBuf::from);
+        // `imported` is only assigned on native (the browser opens files later,
+        // via the host picker, never at construction time).
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut imported = false;
         let textarea = match &path {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(p) if p.is_file() => {
                 let loaded = crate::wordstar::load(p)?;
                 imported = loaded.imported;
@@ -252,6 +276,7 @@ impl App {
             confirm: None,
             info: None,
             header_dialog: None,
+            #[cfg(not(target_arch = "wasm32"))]
             browser: None,
             preview_scroll: 0,
             help_scroll: 0,
@@ -260,11 +285,16 @@ impl App {
             wrap: true,
             block_buffer: String::new(),
             marking: false,
+            #[cfg(not(target_arch = "wasm32"))]
             picker: None,
-            graphics: false,
+            // Native starts with no graphics until a protocol is detected; the
+            // browser canvas is always able to show the graphical preview.
+            graphics: cfg!(target_arch = "wasm32"),
             preview_job: None,
             preview_pages: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             preview_page_protocols: RefCell::new(Vec::new()),
+            #[cfg(not(target_arch = "wasm32"))]
             preview_zoom_protocol: RefCell::new(None),
             preview_view_key: Cell::new(None),
             preview_page: 0,
@@ -366,7 +396,7 @@ impl App {
 
     /// Hand a key to the text widget, honoring overtype mode for printable input.
     fn pass_to_editor(&mut self, key: KeyEvent) {
-        let mut input: Input = key.into();
+        let mut input: Input = crate::input::key_to_input(&key);
 
         // While marking a block, keep movement keys extending the selection
         // (the widget cancels the selection on an un-shifted move otherwise).
@@ -681,6 +711,8 @@ impl App {
     // ------------------------------------------------------------------
 
     /// Open the file browser at the document's directory (or the cwd / home).
+    /// Open the in-app file browser at the document's directory (or cwd / home).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_browser(&mut self) {
         let start = self
             .path
@@ -699,6 +731,16 @@ impl App {
         }
     }
 
+    /// In the browser there is no in-app file tree; defer to the host's native
+    /// file picker. The chosen file arrives asynchronously and is picked up by
+    /// [`poll_pending_open`](Self::poll_pending_open) on a later frame.
+    #[cfg(target_arch = "wasm32")]
+    pub fn open_browser(&mut self) {
+        crate::platform::pick_file(crate::platform::stash_open);
+        self.set_status("Choose a .ws or .md file…");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn handle_browser_key(&mut self, key: KeyEvent) {
         let Some(browser) = self.browser.as_mut() else {
             self.mode = Mode::Editor;
@@ -725,29 +767,51 @@ impl App {
         }
     }
 
-    /// Load a file into the editor, replacing the current buffer.
+    /// Browser mode never activates on wasm (Open uses the host picker), so this
+    /// stub only keeps the mode dispatch exhaustive.
+    #[cfg(target_arch = "wasm32")]
+    fn handle_browser_key(&mut self, _key: KeyEvent) {
+        self.mode = Mode::Editor;
+    }
+
+    /// Apply a freshly loaded document to the editor, replacing the buffer and
+    /// updating the path / modified state. Shared by every open path.
+    fn apply_loaded(&mut self, loaded: crate::wordstar::Loaded, path: PathBuf) {
+        self.textarea = TextArea::new(text_to_lines(&loaded.text));
+        self.apply_editor_theme();
+        if loaded.imported {
+            // Imported WordStar → unsaved Markdown; keep the original intact.
+            let md = path.with_extension("md");
+            self.set_status(format!(
+                "Imported {} — save writes {}",
+                path.display(),
+                md.display()
+            ));
+            self.path = Some(md);
+            self.modified = true;
+        } else {
+            self.set_status(format!("Opened {}", path.display()));
+            self.path = Some(path);
+            self.modified = false;
+        }
+    }
+
+    /// Load a file from disk into the editor, replacing the current buffer.
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf) {
         match crate::wordstar::load(&path) {
-            Ok(loaded) => {
-                self.textarea = TextArea::new(text_to_lines(&loaded.text));
-                self.apply_editor_theme();
-                if loaded.imported {
-                    // Imported WordStar → unsaved Markdown; keep the original intact.
-                    let md = path.with_extension("md");
-                    self.set_status(format!(
-                        "Imported {} — save writes {}",
-                        path.display(),
-                        md.display()
-                    ));
-                    self.path = Some(md);
-                    self.modified = true;
-                } else {
-                    self.set_status(format!("Opened {}", path.display()));
-                    self.path = Some(path);
-                    self.modified = false;
-                }
-            }
+            Ok(loaded) => self.apply_loaded(loaded, path),
             Err(e) => self.set_status(format!("Open failed: {e}")),
+        }
+    }
+
+    /// If the user has chosen a file via the host picker, load it. Called once
+    /// per frame from the browser render loop.
+    #[cfg(target_arch = "wasm32")]
+    pub fn poll_pending_open(&mut self) {
+        if let Some((name, bytes)) = crate::platform::take_open() {
+            let loaded = crate::wordstar::load_bytes(&name, &bytes);
+            self.apply_loaded(loaded, PathBuf::from(name));
         }
     }
 
@@ -756,15 +820,30 @@ impl App {
     // ------------------------------------------------------------------
 
     /// Record the terminal graphics picker detected at startup.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_picker(&mut self, picker: ratatui_image::picker::Picker) {
         use ratatui_image::picker::ProtocolType;
         self.graphics = picker.protocol_type() != ProtocolType::Halfblocks;
         self.picker = Some(picker);
     }
 
-    /// Toggle the markdown preview. Uses the in-terminal graphical preview (one
-    /// page at a time, zoomable/scrollable) when the terminal supports a
-    /// graphics protocol, otherwise the text preview.
+    /// Drop any cached preview render state. On native that means the encoded
+    /// image protocols; the browser canvas keeps no per-page cache.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn clear_preview_protocols(&self) {
+        self.preview_page_protocols.borrow_mut().clear();
+        *self.preview_zoom_protocol.borrow_mut() = None;
+        self.preview_view_key.set(None);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn clear_preview_protocols(&self) {
+        self.preview_view_key.set(None);
+    }
+
+    /// Toggle the markdown preview. Uses the graphical preview (one page at a
+    /// time, zoomable/scrollable) when a terminal graphics protocol is available
+    /// (always, in the browser canvas), otherwise the text preview.
     pub fn toggle_preview(&mut self) {
         if self.mode == Mode::Preview {
             self.close_preview();
@@ -774,9 +853,7 @@ impl App {
             self.preview_zoom = 1.0;
             self.preview_off = (0.0, 0.0);
             self.preview_pages.clear();
-            self.preview_page_protocols.borrow_mut().clear();
-            *self.preview_zoom_protocol.borrow_mut() = None;
-            self.preview_view_key.set(None);
+            self.clear_preview_protocols();
             self.preview_job = None;
             if self.graphics {
                 // Start an incremental render; the main loop drives it while the
@@ -791,9 +868,7 @@ impl App {
         self.mode = Mode::Editor;
         self.preview_job = None;
         self.preview_pages.clear();
-        self.preview_page_protocols.borrow_mut().clear();
-        *self.preview_zoom_protocol.borrow_mut() = None;
-        self.preview_view_key.set(None);
+        self.clear_preview_protocols();
     }
 
     /// True while the graphical preview is still being rasterized.
@@ -814,11 +889,16 @@ impl App {
         let Some(mut job) = self.preview_job.take() else {
             return;
         };
-        job.step(Duration::from_millis(33));
+        job.step(33.0);
         if job.is_done() {
             self.preview_pages = job.finish();
-            *self.preview_page_protocols.borrow_mut() =
-                (0..self.preview_pages.len()).map(|_| None).collect();
+            // Native: allocate one lazy protocol slot per page. The browser draws
+            // straight from `preview_pages`, so it needs no per-page cache.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                *self.preview_page_protocols.borrow_mut() =
+                    (0..self.preview_pages.len()).map(|_| None).collect();
+            }
         } else {
             self.preview_job = Some(job);
         }
@@ -826,7 +906,9 @@ impl App {
 
     /// Ensure the protocol needed for the current view exists (building/encoding
     /// it only when missing or when the zoomed view actually changed). Called
-    /// from the renderer, so navigation itself does no image work.
+    /// from the renderer, so navigation itself does no image work. Native only —
+    /// the browser paints `preview_pages` straight to a canvas.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn ensure_preview(&self, inner: Rect) {
         let Some(picker) = self.picker.as_ref() else {
             return;
@@ -854,6 +936,7 @@ impl App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn zoom_view_key(&self, inner: Rect) -> PreviewViewKey {
         (
             self.preview_page,
@@ -867,6 +950,7 @@ impl App {
 
     /// Crop the current page to a window sized to the pane's aspect ratio,
     /// magnified by the zoom factor and positioned by the pan offset.
+    #[cfg(not(target_arch = "wasm32"))]
     fn zoom_crop(&self, inner: Rect) -> Option<image::RgbaImage> {
         let page = self.preview_pages.get(self.preview_page)?;
         let (fw, fh) = self
@@ -1231,6 +1315,14 @@ impl App {
             self.set_status("Insert cancelled (no name).");
             return;
         }
+        // Inserting by path needs the filesystem; the browser build has none.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            self.set_status("Insert file is not available in the browser build.");
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match crate::wordstar::load(Path::new(path)) {
             Ok(loaded) => {
                 if self.textarea.insert_str(&loaded.text) {
@@ -1441,12 +1533,26 @@ impl App {
         };
         let mut content = self.textarea.lines().join("\n");
         content.push('\n');
+        #[cfg(not(target_arch = "wasm32"))]
         match fs::write(&path, content) {
             Ok(()) => {
                 self.modified = false;
                 self.set_status(format!("Saved {}", path.display()));
             }
             Err(e) => self.set_status(format!("Save failed: {e}")),
+        }
+        // In the browser there is no filesystem: hand the bytes to the host as a
+        // download named after the document.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = file_download_name(&path, "md");
+            match crate::platform::download(&name, "text/markdown", content.as_bytes()) {
+                Ok(()) => {
+                    self.modified = false;
+                    self.set_status(format!("Downloaded {name}"));
+                }
+                Err(e) => self.set_status(e),
+            }
         }
     }
 
@@ -1470,9 +1576,18 @@ impl App {
         let title = self.file_name();
         let markdown = self.textarea.lines().join("\n");
         let bytes = crate::pdf::export(&markdown, &title);
+        #[cfg(not(target_arch = "wasm32"))]
         match fs::write(path, bytes) {
             Ok(()) => self.set_status(format!("Exported {}", path.display())),
             Err(e) => self.set_status(format!("PDF export failed: {e}")),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = file_download_name(path, "pdf");
+            match crate::platform::download(&name, "application/pdf", &bytes) {
+                Ok(()) => self.set_status(format!("Downloaded {name}")),
+                Err(e) => self.set_status(e),
+            }
         }
     }
 
@@ -1678,6 +1793,7 @@ impl App {
         self.mode = Mode::Editor;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn mouse_browser(&mut self, me: MouseEvent) {
         match me.kind {
             MouseEventKind::ScrollDown => {
@@ -1737,6 +1853,10 @@ impl App {
             _ => {}
         }
     }
+
+    /// Browser mode never activates on wasm; stub keeps mouse dispatch exhaustive.
+    #[cfg(target_arch = "wasm32")]
+    fn mouse_browser(&mut self, _me: MouseEvent) {}
 
     fn mouse_preview(&mut self, me: MouseEvent) {
         if self.preview_pages.is_empty() {
@@ -1839,10 +1959,10 @@ impl App {
 
     /// Record a click and report whether it completes a double-click.
     fn register_click(&mut self, x: u16, y: u16) -> bool {
-        let now = Instant::now();
+        let now = crate::platform::now_ms();
         let double = matches!(
             self.last_click,
-            Some((t, px, py)) if px == x && py == y && now.duration_since(t) < Duration::from_millis(400)
+            Some((t, px, py)) if px == x && py == y && now - t < 400.0
         );
         self.last_click = if double { None } else { Some((now, x, y)) };
         double

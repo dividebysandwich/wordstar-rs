@@ -2,3 +2,4 @@
 *.WS
 *.ws
 TEST.md
+/dist

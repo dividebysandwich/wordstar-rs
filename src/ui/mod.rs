@@ -9,6 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui_image::{FilterType, Resize, StatefulImage};
 
 use crate::app::{App, Mode};
@@ -50,7 +51,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Menu => menu_dropdown(frame, area, app),
         Mode::Prompt => prompt_overlay(frame, area, app),
         Mode::Confirm => confirm_overlay(frame, area, app),
+        // The in-app browser exists on native only; the browser build reaches
+        // Open through the host file picker and never enters Browser mode.
+        #[cfg(not(target_arch = "wasm32"))]
         Mode::Browser => browser_overlay(frame, area, app),
+        #[cfg(target_arch = "wasm32")]
+        Mode::Browser => {}
         Mode::Preview => preview_overlay(frame, area, app),
         Mode::Help => help_overlay(frame, area, app),
         Mode::Info => info_overlay(frame, area, app),
@@ -426,21 +432,29 @@ fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
     app.preview_area.set(inner);
 
     if graphical {
-        // Build/encode only what this view needs (cached per page; the zoom crop
-        // is re-encoded only when the view changes). `Scale` (not `Fit`) so the
-        // page/crop fills the pane — otherwise zooming only changes the region.
-        // `Lanczos3` (rather than the default nearest-neighbour) downsamples the
-        // high-resolution page with antialiasing, keeping the glyph edges smooth.
-        app.ensure_preview(inner);
-        let image = StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3)));
-        if app.preview_zoom <= 1.001 {
-            let mut cache = app.preview_page_protocols.borrow_mut();
-            if let Some(Some(state)) = cache.get_mut(app.preview_page) {
+        // Native: build/encode only what this view needs (cached per page; the
+        // zoom crop is re-encoded only when the view changes). `Scale` (not
+        // `Fit`) so the page/crop fills the pane. `Lanczos3` downsamples the
+        // high-resolution page with antialiasing, keeping glyph edges smooth.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            app.ensure_preview(inner);
+            let image =
+                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3)));
+            if app.preview_zoom <= 1.001 {
+                let mut cache = app.preview_page_protocols.borrow_mut();
+                if let Some(Some(state)) = cache.get_mut(app.preview_page) {
+                    frame.render_stateful_widget(image, inner, state);
+                }
+            } else if let Some(state) = app.preview_zoom_protocol.borrow_mut().as_mut() {
                 frame.render_stateful_widget(image, inner, state);
             }
-        } else if let Some(state) = app.preview_zoom_protocol.borrow_mut().as_mut() {
-            frame.render_stateful_widget(image, inner, state);
         }
+        // Browser: the page is painted by the canvas overlay (see
+        // `wasm::canvas`), driven from the render loop and stacked above this
+        // pane, so there is nothing to draw into the ratatui buffer here.
+        #[cfg(target_arch = "wasm32")]
+        let _ = inner;
     } else {
         // Text preview fallback.
         let lines = preview::render(&app.textarea.lines().join("\n"));
@@ -468,6 +482,7 @@ fn help_overlay(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(para, inner);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn browser_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let Some(browser) = app.browser.as_ref() else {
         return;
@@ -553,7 +568,9 @@ fn browser_overlay(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// Format a byte count compactly (e.g. `2.9k`, `35k`, `1.0M`).
+/// Format a byte count compactly (e.g. `2.9k`, `35k`, `1.0M`). Used by the
+/// native file browser only.
+#[cfg(not(target_arch = "wasm32"))]
 fn human_size(bytes: u64) -> String {
     if bytes < 1000 {
         format!("{bytes}")

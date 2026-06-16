@@ -10,19 +10,69 @@ readme = "README.md"
 keywords = ["wordstar", "editor", "tui", "markdown", "ratatui"]
 categories = ["command-line-utilities", "text-editors"]
 
+# A `cdylib` is needed for the WebAssembly/Ratzilla build (Trunk links it);
+# `rlib` keeps the native binary and the unit tests linking against the library.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Dependencies shared by every target. Rendering (cosmic-text, image), document
+# parsing/export (printpdf, pulldown-cmark) and the text widget all compile to
+# wasm32-unknown-unknown unchanged.
 [dependencies]
 anyhow = "1.0.102"
 cosmic-text = "0.19.0"
-crossterm = "0.29"
-dirs = "6.0.0"
 image = { version = "0.25", default-features = false }
 printpdf = { version = "0.9.1", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
+unicode-segmentation = "1"
+unicode-width = "0.2.2"
+
+# Native terminal stack. `crossterm` does not build for wasm, so everything that
+# depends on it (the crossterm ratatui backend, the inline-image protocol, the
+# textarea's crossterm input conversion) is confined to non-wasm targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+crossterm = "0.29"
+dirs = "6.0.0"
 ratatui = "0.30"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 ratatui-textarea = { version = "0.9", features = ["crossterm", "search"] }
-unicode-segmentation = "1"
-unicode-width = "0.2.2"
+
+# Browser stack. Ratzilla supplies a DOM backend for ratatui (built without the
+# crossterm backend); web-sys/js-sys provide the file picker, downloads and the
+# preview canvas.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ratatui = { version = "0.30", default-features = false }
+ratatui-textarea = { version = "0.9", default-features = false, features = ["search"] }
+ratzilla = "0.3"
+# ratatui-core needs a `critical-section` implementation; the std impl works on
+# single-threaded wasm and resolves the otherwise-undefined acquire/release.
+critical-section = { version = "1", features = ["std"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
+    "File",
+    "FileList",
+    "FileReader",
+    "CssStyleDeclaration",
+    "Performance",
+]
 
 # Strip and optimize release binaries (smaller archives, .deb and .msi payloads).
 [profile.release]

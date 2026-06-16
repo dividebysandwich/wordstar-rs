@@ -1,0 +1,8 @@
+# Trunk build configuration for the WebAssembly (browser) target.
+# Build with `trunk build --release`; develop with `trunk serve`.
+[build]
+target = "index.html"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
