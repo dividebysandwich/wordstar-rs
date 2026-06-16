@@ -258,4 +258,3 @@ mod tests {
         assert!(loaded.text.contains("[This is underline]{.underline}"));
     }
 }
-

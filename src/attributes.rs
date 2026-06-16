@@ -106,6 +106,48 @@ pub fn find_span(chars: &[char], start: usize) -> Option<(usize, usize, usize)> 
     Some((rb, bo, k))
 }
 
+/// Flag which characters of `chars` are formatting markers (not printed text):
+/// `*`, `**`, `~~`, and the `[`/`]{…}` of attribute spans.
+fn marker_mask(chars: &[char]) -> Vec<bool> {
+    let n = chars.len();
+    let mut mask = vec![false; n];
+    let mut i = 0;
+    while i < n {
+        if (chars[i] == '*' || chars[i] == '~') && i + 1 < n && chars[i + 1] == chars[i] {
+            mask[i] = true;
+            mask[i + 1] = true;
+            i += 2;
+            continue;
+        }
+        if chars[i] == '*' {
+            mask[i] = true;
+            i += 1;
+            continue;
+        }
+        if chars[i] == '['
+            && let Some((rb, _bo, bc)) = find_span(chars, i)
+        {
+            mask[i] = true; // '['
+            for m in mask.iter_mut().take(bc + 1).skip(rb) {
+                *m = true; // ']', '{', …, '}'
+            }
+            i = bc + 1;
+            continue;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// The visible (printed) column for a raw cursor column, ignoring inline
+/// formatting markers.
+pub fn visible_column(line: &str, raw_col: usize) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let mask = marker_mask(&chars);
+    let limit = raw_col.min(chars.len());
+    mask[..limit].iter().filter(|m| !**m).count()
+}
+
 /// Remove inline markdown formatting markers from `s`, keeping the text.
 pub fn strip_inline_markers(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
@@ -242,6 +284,20 @@ mod tests {
     fn strip_removes_markers() {
         assert_eq!(strip_inline_markers("**bold** and *it*"), "bold and it");
         assert_eq!(strip_inline_markers("[x]{font=\"Courier\"}"), "x");
+    }
+
+    #[test]
+    fn visible_column_ignores_markers() {
+        // plain text: identity
+        assert_eq!(visible_column("abc", 2), 2);
+        // "**bold**": cursor right after opening ** (raw 2) → visible 0
+        assert_eq!(visible_column("**bold**", 2), 0);
+        // cursor after "bold" (raw 6) → visible 4
+        assert_eq!(visible_column("**bold**", 6), 4);
+        // span: "[hi]{.underline}" — cursor after 'hi' (raw 3 = ']') → visible 2
+        assert_eq!(visible_column("[hi]{.underline}", 3), 2);
+        // end of "x*y*z" (raw 5) → visible 3 (x, y, z)
+        assert_eq!(visible_column("x*y*z", 5), 3);
     }
 
     #[test]

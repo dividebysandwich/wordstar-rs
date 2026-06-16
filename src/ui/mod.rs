@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     title_bar(frame, rows[0], app);
     menu_bar(frame, rows[1], app);
     style_bar(frame, rows[2], app);
-    ruler(frame, rows[3]);
+    ruler(frame, rows[3], app);
     if app.mode == Mode::Clean {
         clean_pane(frame, rows[4], app);
     } else {
@@ -549,22 +549,51 @@ fn style_bar(frame: &mut Frame, area: Rect, app: &App) {
 const RIGHT_MARGIN: usize = 65;
 const TAB_EVERY: usize = 5;
 
-fn ruler(frame: &mut Frame, area: Rect) {
-    let width = area.width as usize;
-    let mut line = String::with_capacity(width);
-    for col in 0..width {
-        let ch = if col == 0 {
-            'L'
-        } else if col == RIGHT_MARGIN.min(width.saturating_sub(1)) {
-            'R'
-        } else if col % TAB_EVERY == 0 {
-            '!'
-        } else {
-            '-'
-        };
-        line.push(ch);
+fn ruler_char(col: usize, width: usize) -> char {
+    if col == 0 {
+        'L'
+    } else if col == RIGHT_MARGIN.min(width.saturating_sub(1)) {
+        'R'
+    } else if col.is_multiple_of(TAB_EVERY) {
+        '!'
+    } else {
+        '-'
     }
-    frame.render_widget(Paragraph::new(line).style(theme::ruler()), area);
+}
+
+fn ruler(frame: &mut Frame, area: Rect, app: &App) {
+    let width = area.width as usize;
+    if width == 0 {
+        return;
+    }
+    let base: Vec<char> = (0..width).map(|c| ruler_char(c, width)).collect();
+
+    // Cursor position on the ruler, counted in printed columns (markers ignored).
+    let cursor = app.textarea.cursor();
+    let line = app
+        .textarea
+        .lines()
+        .get(cursor.0)
+        .map(String::as_str)
+        .unwrap_or("");
+    let indicator = crate::attributes::visible_column(line, cursor.1).min(width - 1);
+
+    let style = theme::ruler();
+    let mark = Style::default()
+        .bg(ratatui::style::Color::Blue)
+        .fg(ratatui::style::Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    let before: String = base[..indicator].iter().collect();
+    let at: String = std::iter::once('▮').collect();
+    let after: String = base[(indicator + 1).min(width)..].iter().collect();
+
+    let row = Line::from(vec![
+        Span::styled(before, style),
+        Span::styled(at, mark),
+        Span::styled(after, style),
+    ]);
+    frame.render_widget(Paragraph::new(row).style(style), area);
 }
 
 #[cfg(test)]
@@ -805,6 +834,33 @@ mod tests {
             screen.contains('[') && screen.contains(']'),
             "progress bar missing"
         );
+    }
+
+    fn ruler_indicator_col(app: &App, w: u16) -> usize {
+        let backend = TestBackend::new(w, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..w)
+            .position(|x| buf[(x, 3)].symbol() == "▮")
+            .expect("ruler indicator present")
+    }
+
+    #[test]
+    fn ruler_indicator_ignores_markers() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("**bold** text");
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+        for _ in 0..6 {
+            app.textarea
+                .move_cursor(ratatui_textarea::CursorMove::Forward);
+        }
+        // Raw column 6 is inside `**bold**`; printed column is 4.
+        assert_eq!(ruler_indicator_col(&app, 40), 4);
+
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::End);
+        // "bold text" is 9 printed characters.
+        assert_eq!(ruler_indicator_col(&app, 40), 9);
     }
 }
 
