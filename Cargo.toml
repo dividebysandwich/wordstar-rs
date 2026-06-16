@@ -12,11 +12,14 @@ categories = ["command-line-utilities", "text-editors"]
 
 [dependencies]
 anyhow = "1.0.102"
+cosmic-text = "0.14"
 crossterm = "0.29"
 dirs = "6.0.0"
+image = { version = "0.25", default-features = false }
 printpdf = { version = "0.8", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
+ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 ratatui-textarea = { version = "0.9", features = ["crossterm", "search"] }
 
 # Strip and optimize release binaries (smaller archives, .deb and .msi payloads).

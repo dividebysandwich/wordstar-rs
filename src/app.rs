@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -126,6 +126,22 @@ pub struct App {
     pub menu: crate::menu::MenuState,
     /// Current paragraph alignment choice.
     pub align: AlignChoice,
+    /// Terminal graphics picker (set at startup when a TTY is available).
+    pub picker: Option<ratatui_image::picker::Picker>,
+    /// Whether a real graphics protocol (Kitty/iTerm2/Sixel) is available.
+    pub graphics: bool,
+    /// The current encoded page image for the graphical preview, if active.
+    pub preview_protocol: RefCell<Option<ratatui_image::protocol::StatefulProtocol>>,
+    /// Rasterized pages of the document (graphical preview).
+    pub preview_pages: Vec<image::RgbaImage>,
+    /// Currently shown page index.
+    pub preview_page: usize,
+    /// Zoom factor (1.0 = whole page fit to the pane).
+    pub preview_zoom: f32,
+    /// Normalized pan offset within the page when zoomed (0.0..=1.0).
+    pub preview_off: (f32, f32),
+    /// Last rendered preview area, for crop sizing.
+    pub preview_area: Cell<Rect>,
     /// True while a mouse drag is extending a selection in the editor.
     mouse_selecting: bool,
     /// Time + cell of the last mouse press, for double-click detection.
@@ -171,6 +187,14 @@ impl App {
             help_scroll: 0,
             menu: crate::menu::MenuState::default(),
             align: AlignChoice::Left,
+            picker: None,
+            graphics: false,
+            preview_protocol: RefCell::new(None),
+            preview_pages: Vec::new(),
+            preview_page: 0,
+            preview_zoom: 1.0,
+            preview_off: (0.0, 0.0),
+            preview_area: Cell::new(Rect::ZERO),
             mouse_selecting: false,
             last_click: None,
             editor_area: Cell::new(Rect::ZERO),
@@ -215,7 +239,7 @@ impl App {
             Mode::Prompt => self.handle_prompt_key(key),
             Mode::Confirm => self.handle_confirm_key(key),
             Mode::Browser => self.handle_browser_key(key),
-            Mode::Preview => self.handle_overlay_key(key, OverlayKind::Preview),
+            Mode::Preview => self.handle_preview_key(key),
             Mode::Help => self.handle_overlay_key(key, OverlayKind::Help),
         }
     }
@@ -578,14 +602,136 @@ impl App {
     // Preview / Help overlays
     // ------------------------------------------------------------------
 
-    /// Toggle the read-only markdown preview.
+    /// Record the terminal graphics picker detected at startup.
+    pub fn set_picker(&mut self, picker: ratatui_image::picker::Picker) {
+        use ratatui_image::picker::ProtocolType;
+        self.graphics = picker.protocol_type() != ProtocolType::Halfblocks;
+        self.picker = Some(picker);
+    }
+
+    /// Toggle the markdown preview. Uses the in-terminal graphical preview (one
+    /// page at a time, zoomable/scrollable) when the terminal supports a
+    /// graphics protocol, otherwise the text preview.
     pub fn toggle_preview(&mut self) {
-        self.mode = if self.mode == Mode::Preview {
-            Mode::Editor
+        if self.mode == Mode::Preview {
+            self.close_preview();
         } else {
             self.preview_scroll = 0;
-            Mode::Preview
+            self.preview_page = 0;
+            self.preview_zoom = 1.0;
+            self.preview_off = (0.0, 0.0);
+            self.preview_pages.clear();
+            *self.preview_protocol.borrow_mut() = None;
+            if self.graphics {
+                self.preview_pages = crate::gfx::render_pages(&self.textarea.lines().join("\n"));
+                if !self.preview_pages.is_empty() {
+                    self.rebuild_preview();
+                }
+            }
+            self.mode = Mode::Preview;
+        }
+    }
+
+    fn close_preview(&mut self) {
+        self.mode = Mode::Editor;
+        self.preview_pages.clear();
+        *self.preview_protocol.borrow_mut() = None;
+    }
+
+    /// Re-encode the current page (cropped for the current zoom/pan) for display.
+    fn rebuild_preview(&self) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
         };
+        let Some(page) = self.preview_pages.get(self.preview_page) else {
+            *self.preview_protocol.borrow_mut() = None;
+            return;
+        };
+        let img = if self.preview_zoom <= 1.001 {
+            page.clone()
+        } else {
+            // Crop a window sized to the pane's aspect ratio, magnified by zoom.
+            let area = self.preview_area.get();
+            let (fw, fh) = self
+                .picker
+                .as_ref()
+                .map(|p| {
+                    let f = p.font_size();
+                    (f.width.max(1) as f32, f.height.max(1) as f32)
+                })
+                .unwrap_or((8.0, 16.0));
+            let pane_w = (area.width as f32 * fw).max(1.0);
+            let pane_h = (area.height as f32 * fh).max(1.0);
+            let cw = (page.width() as f32 / self.preview_zoom)
+                .round()
+                .clamp(1.0, page.width() as f32);
+            let ch = (cw * pane_h / pane_w)
+                .round()
+                .clamp(1.0, page.height() as f32);
+            let max_x = page.width().saturating_sub(cw as u32);
+            let max_y = page.height().saturating_sub(ch as u32);
+            let x = (self.preview_off.0 * max_x as f32).round() as u32;
+            let y = (self.preview_off.1 * max_y as f32).round() as u32;
+            image::imageops::crop_imm(page, x, y, cw as u32, ch as u32).to_image()
+        };
+        *self.preview_protocol.borrow_mut() =
+            Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(img)));
+    }
+
+    fn preview_set_page(&mut self, page: usize) {
+        if page < self.preview_pages.len() && page != self.preview_page {
+            self.preview_page = page;
+            self.preview_off = (0.0, 0.0);
+            self.rebuild_preview();
+        }
+    }
+
+    fn preview_zoom_by(&mut self, factor: f32) {
+        let z = (self.preview_zoom * factor).clamp(1.0, 6.0);
+        if (z - self.preview_zoom).abs() > f32::EPSILON {
+            self.preview_zoom = z;
+            if z <= 1.001 {
+                self.preview_off = (0.0, 0.0);
+            }
+            self.rebuild_preview();
+        }
+    }
+
+    fn preview_pan(&mut self, dx: f32, dy: f32) {
+        self.preview_off.0 = (self.preview_off.0 + dx).clamp(0.0, 1.0);
+        self.preview_off.1 = (self.preview_off.1 + dy).clamp(0.0, 1.0);
+        self.rebuild_preview();
+    }
+
+    /// Key handling for the preview: graphical pages (navigate/zoom/pan) or the
+    /// scrolling text preview as a fallback.
+    fn handle_preview_key(&mut self, key: KeyEvent) {
+        // Text preview (no graphical pages): reuse the scrolling overlay handler.
+        if self.preview_pages.is_empty() {
+            self.handle_overlay_key(key, OverlayKind::Preview);
+            return;
+        }
+        let zoomed = self.preview_zoom > 1.001;
+        match key.code {
+            KeyCode::Esc | KeyCode::F(5) | KeyCode::Char('q') => self.close_preview(),
+            KeyCode::Char('+') | KeyCode::Char('=') => self.preview_zoom_by(1.25),
+            KeyCode::Char('-') | KeyCode::Char('_') => self.preview_zoom_by(0.8),
+            KeyCode::PageDown | KeyCode::Char('n') | KeyCode::Char(' ') => {
+                self.preview_set_page(self.preview_page + 1)
+            }
+            KeyCode::PageUp | KeyCode::Char('p') => {
+                self.preview_set_page(self.preview_page.wrapping_sub(1))
+            }
+            KeyCode::Home => self.preview_set_page(0),
+            KeyCode::End => self.preview_set_page(self.preview_pages.len().saturating_sub(1)),
+            KeyCode::Up if zoomed => self.preview_pan(0.0, -0.12),
+            KeyCode::Down if zoomed => self.preview_pan(0.0, 0.12),
+            KeyCode::Left if zoomed => self.preview_pan(-0.12, 0.0),
+            KeyCode::Right if zoomed => self.preview_pan(0.12, 0.0),
+            KeyCode::Up | KeyCode::Left => self.preview_set_page(self.preview_page.wrapping_sub(1)),
+            KeyCode::Down | KeyCode::Right => self.preview_set_page(self.preview_page + 1),
+            _ => {}
+        }
     }
 
     /// Toggle the help overlay.
@@ -918,7 +1064,7 @@ impl App {
             Mode::Clean => self.mouse_scroll(me, OverlayKind::Preview),
             Mode::Menu => self.mouse_menu(me),
             Mode::Browser => self.mouse_browser(me),
-            Mode::Preview => self.mouse_scroll(me, OverlayKind::Preview),
+            Mode::Preview => self.mouse_preview(me),
             Mode::Help => self.mouse_scroll(me, OverlayKind::Help),
             Mode::Prompt | Mode::Confirm => {} // keyboard-only
         }
@@ -1060,6 +1206,31 @@ impl App {
                         self.mode = Mode::Editor;
                         self.load_file(path);
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_preview(&mut self, me: MouseEvent) {
+        if self.preview_pages.is_empty() {
+            self.mouse_scroll(me, OverlayKind::Preview);
+            return;
+        }
+        let zoomed = self.preview_zoom > 1.001;
+        match me.kind {
+            MouseEventKind::ScrollDown => {
+                if zoomed {
+                    self.preview_pan(0.0, 0.12);
+                } else {
+                    self.preview_set_page(self.preview_page + 1);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if zoomed {
+                    self.preview_pan(0.0, -0.12);
+                } else {
+                    self.preview_set_page(self.preview_page.wrapping_sub(1));
                 }
             }
             _ => {}

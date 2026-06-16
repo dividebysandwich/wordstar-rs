@@ -50,16 +50,16 @@ fn courier(bold: bool, italic: bool) -> BuiltinFont {
     }
 }
 
-/// A styled run of text on one line.
+/// A styled run of text on one line. Shared with the graphical preview.
 #[derive(Clone)]
-struct Seg {
-    text: String,
-    bold: bool,
-    italic: bool,
+pub(crate) struct Seg {
+    pub(crate) text: String,
+    pub(crate) bold: bool,
+    pub(crate) italic: bool,
 }
 
-/// A laid-out-able block of content.
-enum Block {
+/// A laid-out-able block of content. Shared with the graphical preview.
+pub(crate) enum Block {
     Heading(u8, Vec<Seg>),
     Para(Vec<Seg>),
     Item {
@@ -86,7 +86,7 @@ pub fn export(markdown: &str, title: &str) -> Vec<u8> {
 }
 
 /// Drop a leading YAML frontmatter block (`--- … ---`) so it is not printed.
-fn strip_frontmatter(src: &str) -> &str {
+pub(crate) fn strip_frontmatter(src: &str) -> &str {
     let mut lines = src.lines();
     if lines.next().map(str::trim) != Some("---") {
         return src;
@@ -105,7 +105,7 @@ fn strip_frontmatter(src: &str) -> &str {
 // Markdown -> blocks
 // ---------------------------------------------------------------------------
 
-fn parse(src: &str) -> Vec<Block> {
+pub(crate) fn parse(src: &str) -> Vec<Block> {
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     let mut b = Builder::default();
     for event in Parser::new_ext(src, opts) {

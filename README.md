@@ -104,9 +104,28 @@ Your manuscript begins here…
 
 Press **F5** for a read-only **Preview**: the document is rendered with the
 markers hidden, the way the finished page reads. Press **F5**, **Esc**, or **q**
-to return to editing. (A terminal cannot show real fonts or point sizes — those
-are recorded in the file and surfaced on the style bar, just as WordStar only
-previewed fonts in its own preview mode.)
+to return to editing.
+
+If your terminal supports inline graphics (**Kitty**, **iTerm2**, **WezTerm**,
+**Ghostty**, **Sixel**-capable terminals, …), the preview is shown as a real
+**rendered image** — proper proportional type, true bold/italic, and scaled
+headings, laid out with your system fonts. The document is paginated into
+**A4 pages shown one at a time**, which you can page through and zoom:
+
+| Keys | In the graphical preview |
+| ---- | ------------------------ |
+| **PgDn / PgUp** (or **n / p**, or ↑/↓) | Next / previous page |
+| **Home / End** | First / last page |
+| **+ / −** | Zoom in / out |
+| **Arrow keys** (when zoomed) | Pan around the page |
+| **Mouse wheel** | Page (or pan when zoomed) |
+| **Esc / F5 / q** | Close |
+
+On terminals without graphics support it automatically falls back to the
+scrollable styled text preview, so it works everywhere. (In the text preview a
+terminal still can't show real fonts or point sizes — those are recorded in the
+file and surfaced on the style bar, just as WordStar only previewed fonts in its
+own preview mode.)
 
 ### Markdown WordStar never had
 

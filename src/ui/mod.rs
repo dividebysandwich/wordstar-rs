@@ -9,6 +9,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+use ratatui_image::{Resize, StatefulImage};
+
 use crate::app::{App, Mode};
 use crate::theme;
 use crate::{help, menu, preview};
@@ -132,19 +134,40 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
 
 fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, area);
+
+    let graphical = !app.preview_pages.is_empty();
+    let title = if graphical {
+        format!(
+            " Preview  page {}/{}  {:.0}%  —  PgUp/PgDn pages · +/- zoom · arrows · Esc ",
+            app.preview_page + 1,
+            app.preview_pages.len(),
+            app.preview_zoom * 100.0,
+        )
+    } else {
+        " Preview — Esc/F5/q to close ".to_string()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Preview — Esc/F5/q to close ")
+        .title(title)
         .style(theme::canvas());
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.preview_area.set(inner);
 
-    let lines = preview::render(&app.textarea.lines().join("\n"));
-    let para = Paragraph::new(lines)
-        .style(theme::canvas())
-        .wrap(Wrap { trim: false })
-        .scroll((app.preview_scroll, 0));
-    frame.render_widget(para, inner);
+    if graphical {
+        if let Some(state) = app.preview_protocol.borrow_mut().as_mut() {
+            let image = StatefulImage::default().resize(Resize::Fit(None));
+            frame.render_stateful_widget(image, inner, state);
+        }
+    } else {
+        // Text preview fallback.
+        let lines = preview::render(&app.textarea.lines().join("\n"));
+        let para = Paragraph::new(lines)
+            .style(theme::canvas())
+            .wrap(Wrap { trim: false })
+            .scroll((app.preview_scroll, 0));
+        frame.render_widget(para, inner);
+    }
 }
 
 fn help_overlay(frame: &mut Frame, area: Rect, app: &App) {

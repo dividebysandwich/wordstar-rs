@@ -56,7 +56,7 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^KP", "Export to PDF");
     row(&mut out, "^KQ  / F10", "Quit (abandon changes)");
     row(&mut out, "F3", "Open the file browser");
-    row(&mut out, "F5", "Toggle the formatted preview");
+    row(&mut out, "F5", "Toggle preview (graphical if supported)");
     row(&mut out, "F1  / ^J", "This help screen");
 
     head(&mut out, "Editing");
