@@ -36,6 +36,8 @@ pub enum Command {
     TogglePreview,
     /// Start a new, empty document.
     New,
+    /// Export the document to a formatted PDF.
+    ExportPdf,
     /// Show the About message.
     About,
 
@@ -123,6 +125,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         SaveAs => app.start_save_as(),
         TogglePreview => app.toggle_preview(),
         New => app.new_document(),
+        ExportPdf => app.export_pdf(),
         About => app.set_status("wordstar-rs — a WordStar 7 clone in Rust (ratatui)."),
 
         MoveUp => app.textarea.move_cursor(CursorMove::Up),

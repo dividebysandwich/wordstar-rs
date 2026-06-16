@@ -653,5 +653,3 @@ fn status_bar(frame: &mut Frame, area: Rect, app: &App) {
         cols[1],
     );
 }
-
-

@@ -806,6 +806,22 @@ impl App {
         }
     }
 
+    /// Export the document to a formatted PDF next to the source file.
+    pub fn export_pdf(&mut self) {
+        let Some(path) = self.path.clone() else {
+            self.set_status("Save the file first (^KS), then export to PDF.");
+            return;
+        };
+        let pdf_path = path.with_extension("pdf");
+        let title = self.file_name();
+        let markdown = self.textarea.lines().join("\n");
+        let bytes = crate::pdf::export(&markdown, &title);
+        match fs::write(&pdf_path, bytes) {
+            Ok(()) => self.set_status(format!("Exported {}", pdf_path.display())),
+            Err(e) => self.set_status(format!("PDF export failed: {e}")),
+        }
+    }
+
     /// Quit, warning once if there are unsaved changes.
     pub fn request_quit(&mut self) {
         if self.modified && !self.quit_confirmed {

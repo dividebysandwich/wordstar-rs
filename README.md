@@ -217,6 +217,7 @@ read-only view — press `^OD` again (or `Esc`) to return to editing.
 | `^KS` / `F2`  | Save                    |
 | `^KD`         | Save and keep editing   |
 | `^KX`         | Save and exit           |
+| `^KP`         | Export to PDF           |
 | `^KQ` / `F10` | Quit (asks before discarding unsaved changes) |
 | `F3`          | Open the file browser   |
 | `F5`          | Toggle the formatted preview |
@@ -279,6 +280,19 @@ Marked text works with the block commands (`^KC` copy, `^KV` paste, `^KY`
 delete) just as a keyboard-marked block does.
 
 ---
+
+## Exporting to PDF
+
+Press **`^KP`** (or **File → Export PDF…**) to write a formatted PDF next to your
+document — `chapter1.md` becomes `chapter1.pdf`. (Save the file first so it has a
+name.)
+
+The PDF is laid out on A4 pages with page numbers, and renders your formatting:
+headings, **bold**, *italic*, lists (bulleted, numbered, and task lists), block
+quotes, code blocks, and tables. It is typeset in the Courier family — a
+fixed-pitch, typewriter look in keeping with WordStar's manuscript heritage, and
+one that needs no bundled fonts. Text is limited to the Latin-1 / Windows-1252
+character set; anything outside it is shown as `?`.
 
 ## File format
 

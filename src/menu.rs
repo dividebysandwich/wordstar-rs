@@ -50,6 +50,8 @@ static FILE: &[MenuItem] = &[
     item("Save As...", "", Command::SaveAs),
     item("Save & Exit", "^KX", Command::SaveExit),
     SEP,
+    item("Export PDF...", "^KP", Command::ExportPdf),
+    SEP,
     item("Exit", "^KQ / F10", Command::Quit),
 ];
 

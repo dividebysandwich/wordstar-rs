@@ -10,6 +10,7 @@ mod commands;
 mod help;
 mod keymap;
 mod menu;
+mod pdf;
 mod preview;
 mod theme;
 mod ui;

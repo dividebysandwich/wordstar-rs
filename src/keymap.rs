@@ -101,7 +101,9 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         // Prefixes.
         'k' => {
             *state = ChordState::K;
-            Resolution::Pending("^K  Block & files:  S)ave  D)one  X)exit  Q)uit  B/K/C/V/Y block")
+            Resolution::Pending(
+                "^K  Block & files:  S)ave  D)one  X)exit  Q)uit  P)df  B/K/C/V/Y block",
+            )
         }
         'q' => {
             *state = ChordState::Q;
@@ -148,6 +150,7 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('d') => Resolution::Command(SaveResume),
         Some('x') => Resolution::Command(SaveExit),
         Some('q') => Resolution::Command(Quit),
+        Some('p') => Resolution::Command(ExportPdf),
         Some('b') => Resolution::Command(BlockBegin),
         Some('k') => Resolution::Command(BlockEnd),
         Some('c') => Resolution::Command(BlockCopy),
