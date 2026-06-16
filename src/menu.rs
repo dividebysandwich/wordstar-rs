@@ -67,6 +67,7 @@ static EDIT: &[MenuItem] = &[
 
 static VIEW: &[MenuItem] = &[
     item("Preview", "F5", Command::TogglePreview),
+    item("Word Wrap", "^OW", Command::ToggleWrap),
     SEP,
     item("Insert / Overtype", "^V", Command::ToggleInsert),
 ];

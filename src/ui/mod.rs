@@ -30,8 +30,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    // Record geometry for mouse hit-testing.
-    app.editor_area.set(rows[4]);
     app.menu_bar_area.set(rows[1]);
 
     title_bar(frame, rows[0], app);
@@ -39,13 +37,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     style_bar(frame, rows[2], app);
     ruler(frame, rows[3], app);
     if app.mode == Mode::Clean {
+        app.editor_area.set(rows[4]);
         clean_pane(frame, rows[4], app);
     } else {
-        // The text widget only styles cells it draws into, so paint the whole
-        // canvas WordStar-blue first; otherwise empty space shows the terminal's
-        // default background.
-        frame.render_widget(Block::default().style(theme::canvas()), rows[4]);
-        frame.render_widget(&app.textarea, rows[4]);
+        editor_pane(frame, rows[4], app);
     }
     status_bar(frame, rows[5], app);
 
@@ -59,6 +54,58 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Preview => preview_overlay(frame, area, app),
         Mode::Help => help_overlay(frame, area, app),
     }
+}
+
+/// Render the editing canvas plus the WordStar right-border flag column, which
+/// marks where lines end with a hard return (`<` = paragraph break) versus a
+/// soft word-wrap continuation (blank).
+fn editor_pane(frame: &mut Frame, area: Rect, app: &App) {
+    // The text widget only styles cells it draws into, so paint the whole canvas
+    // WordStar-blue first; otherwise empty space shows the terminal's default bg.
+    frame.render_widget(Block::default().style(theme::canvas()), area);
+
+    let flag_w: u16 = if area.width > 1 { 1 } else { 0 };
+    let text_area = Rect {
+        width: area.width - flag_w,
+        ..area
+    };
+    app.editor_area.set(text_area);
+    frame.render_widget(&app.textarea, text_area);
+
+    if flag_w == 1 {
+        let flags = flag_column(app, text_area);
+        let lines: Vec<Line> = flags
+            .into_iter()
+            .map(|c| Line::from(c.to_string()))
+            .collect();
+        let col = Rect::new(area.x + text_area.width, area.y, 1, area.height);
+        let style = theme::canvas().fg(ratatui::style::Color::LightCyan);
+        frame.render_widget(Paragraph::new(lines).style(style), col);
+    }
+}
+
+/// Compute the right-border flag character for each on-screen row.
+fn flag_column(app: &App, text_area: Rect) -> Vec<char> {
+    let width = text_area.width as usize;
+    let lines = app.textarea.lines();
+    let rows = crate::wrap::layout(
+        lines,
+        app.textarea.wrap_mode(),
+        width,
+        app.textarea.tab_length(),
+    );
+    let cursor = app.textarea.cursor();
+    let cursor_visual = crate::wrap::visual_index(&rows, cursor.0, cursor.1);
+    let screen_row = app.textarea.screen_cursor().row;
+    let top = cursor_visual.saturating_sub(screen_row);
+
+    (0..text_area.height as usize)
+        .map(|y| match rows.get(top + y) {
+            Some(r) if r.last => '<', // hard return — paragraph break
+            Some(_) => ' ',           // soft-wrapped line continuation
+            None => ' ',              // past end of document
+        })
+        .collect()
 }
 
 /// Render the editor region as read-only formatted text (the "hide markup"
@@ -861,6 +908,27 @@ mod tests {
         app.textarea.move_cursor(ratatui_textarea::CursorMove::End);
         // "bold text" is 9 printed characters.
         assert_eq!(ruler_indicator_col(&app, 40), 9);
+    }
+
+    #[test]
+    fn flag_column_marks_paragraphs_vs_wraps() {
+        let mut app = App::new(None).unwrap();
+        app.textarea
+            .insert_str("This is a fairly long line that will wrap across rows");
+        app.textarea.insert_newline();
+        app.textarea.insert_str("Short");
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Flag column is the rightmost cell; the editor starts at y = 4.
+        let flag = |y: u16| buf[(39, y)].symbol().chars().next().unwrap();
+        assert_eq!(flag(4), ' ', "wrapped continuation row has no flag");
+        assert_eq!(flag(5), '<', "paragraph end (hard return) is flagged");
+        assert_eq!(flag(6), '<', "second paragraph end is flagged");
+        assert_eq!(flag(7), ' ', "past end of document is blank");
     }
 }
 

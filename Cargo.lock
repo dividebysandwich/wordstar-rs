@@ -3353,6 +3353,8 @@ dependencies = [
  "ratatui",
  "ratatui-image",
  "ratatui-textarea",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

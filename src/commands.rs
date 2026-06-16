@@ -34,6 +34,8 @@ pub enum Command {
     SaveAs,
     /// Toggle the formatted preview (F5).
     TogglePreview,
+    /// Toggle word wrap (^OW).
+    ToggleWrap,
     /// Start a new, empty document.
     New,
     /// Export the document to a formatted PDF.
@@ -124,6 +126,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         OpenBrowser => app.open_browser(),
         SaveAs => app.start_save_as(),
         TogglePreview => app.toggle_preview(),
+        ToggleWrap => app.toggle_wrap(),
         New => app.new_document(),
         ExportPdf => app.start_export_pdf(),
         About => app.set_status("wordstar-rs — a WordStar 7 clone in Rust (ratatui)."),

@@ -111,7 +111,9 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         }
         'o' => {
             *state = ChordState::O;
-            Resolution::Pending("^O  Onscreen:  D)isplay markup  C)enter  J)ustify  L)eft  R)ight")
+            Resolution::Pending(
+                "^O  Onscreen:  D)isplay markup  W)ord wrap  C)enter  J)ustify  L)eft  R)ight",
+            )
         }
         'p' => {
             *state = ChordState::P;
@@ -185,6 +187,7 @@ fn resolve_o(key: KeyEvent) -> Resolution {
     use Command::*;
     match letter(&key) {
         Some('d') => Resolution::Command(ToggleMarkup),
+        Some('w') => Resolution::Command(ToggleWrap),
         Some('c') => Resolution::Command(AlignCenter),
         Some('j') => Resolution::Command(AlignJustify),
         Some('l') => Resolution::Command(AlignLeft),

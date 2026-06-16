@@ -21,6 +21,8 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 ratatui-textarea = { version = "0.9", features = ["crossterm", "search"] }
+unicode-segmentation = "1"
+unicode-width = "0.2"
 
 # Strip and optimize release binaries (smaller archives, .deb and .msi payloads).
 [profile.release]

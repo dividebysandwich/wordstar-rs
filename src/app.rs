@@ -130,6 +130,8 @@ pub struct App {
     pub menu: crate::menu::MenuState,
     /// Current paragraph alignment choice.
     pub align: AlignChoice,
+    /// Whether word wrap is enabled (WordStar wraps by default).
+    pub wrap: bool,
     /// Persistent clipboard for block copy / cut / paste.
     pub block_buffer: String,
     /// True while a block is being marked, so cursor movement extends the
@@ -205,6 +207,7 @@ impl App {
             help_scroll: 0,
             menu: crate::menu::MenuState::default(),
             align: AlignChoice::Left,
+            wrap: true,
             block_buffer: String::new(),
             marking: false,
             picker: None,
@@ -239,6 +242,26 @@ impl App {
         self.textarea.set_cursor_line_style(theme::canvas());
         self.textarea.set_selection_style(theme::selection());
         self.textarea.set_search_style(theme::search());
+        self.textarea.set_wrap_mode(self.wrap_mode());
+    }
+
+    fn wrap_mode(&self) -> ratatui_textarea::WrapMode {
+        if self.wrap {
+            ratatui_textarea::WrapMode::Word
+        } else {
+            ratatui_textarea::WrapMode::None
+        }
+    }
+
+    /// Toggle word wrap (WordStar `^OW` / View menu).
+    pub fn toggle_wrap(&mut self) {
+        self.wrap = !self.wrap;
+        self.textarea.set_wrap_mode(self.wrap_mode());
+        self.set_status(if self.wrap {
+            "Word wrap on."
+        } else {
+            "Word wrap off."
+        });
     }
 
     /// Document name for the title bar.
@@ -1670,6 +1693,16 @@ mod tests {
         }
         app.block_copy();
         assert_eq!(app.block_buffer, "abc");
+    }
+
+    #[test]
+    fn word_wrap_on_by_default_and_toggles() {
+        let mut app = App::new(None).unwrap();
+        assert!(app.wrap);
+        assert_eq!(app.textarea.wrap_mode(), ratatui_textarea::WrapMode::Word);
+        app.toggle_wrap();
+        assert!(!app.wrap);
+        assert_eq!(app.textarea.wrap_mode(), ratatui_textarea::WrapMode::None);
     }
 
     #[test]

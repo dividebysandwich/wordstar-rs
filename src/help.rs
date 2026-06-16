@@ -90,6 +90,7 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Onscreen format (^O)");
     row(&mut out, "^OD", "Hide / show formatting markup");
+    row(&mut out, "^OW", "Toggle word wrap");
     row(&mut out, "^OC", "Center the paragraph");
     row(&mut out, "^OL / ^OR", "Align left / right");
     row(&mut out, "^OJ", "Justify");
