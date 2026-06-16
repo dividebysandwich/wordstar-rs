@@ -15,6 +15,7 @@ mod pdf;
 mod preview;
 mod theme;
 mod ui;
+mod wordstar;
 
 use anyhow::Result;
 use ratatui::DefaultTerminal;

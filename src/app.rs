@@ -168,23 +168,26 @@ impl App {
     /// Build the app, optionally loading a file from `path`.
     pub fn new(path: Option<String>) -> Result<Self> {
         let path = path.map(PathBuf::from);
+        let mut imported = false;
         let textarea = match &path {
             Some(p) if p.is_file() => {
-                let content = fs::read_to_string(p)?;
-                let lines: Vec<String> = if content.is_empty() {
-                    vec![String::new()]
-                } else {
-                    content.lines().map(str::to_owned).collect()
-                };
-                TextArea::new(lines)
+                let loaded = crate::wordstar::load(p)?;
+                imported = loaded.imported;
+                TextArea::new(text_to_lines(&loaded.text))
             }
             _ => TextArea::default(),
+        };
+        // An imported WordStar file becomes an unsaved Markdown document so the
+        // original .WS is never overwritten.
+        let path = match (imported, &path) {
+            (true, Some(p)) => Some(p.with_extension("md")),
+            _ => path,
         };
 
         let mut app = Self {
             textarea,
             path,
-            modified: false,
+            modified: imported,
             should_quit: false,
             mode: Mode::default(),
             insert_mode: true,
@@ -216,6 +219,9 @@ impl App {
             browser_list_area: Cell::new(Rect::ZERO),
         };
         app.apply_editor_theme();
+        if imported {
+            app.set_status("Imported WordStar file — saving will write a new .md file.");
+        }
         Ok(app)
     }
 
@@ -588,18 +594,25 @@ impl App {
 
     /// Load a file into the editor, replacing the current buffer.
     fn load_file(&mut self, path: PathBuf) {
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                let lines: Vec<String> = if content.is_empty() {
-                    vec![String::new()]
-                } else {
-                    content.lines().map(str::to_owned).collect()
-                };
-                self.textarea = TextArea::new(lines);
+        match crate::wordstar::load(&path) {
+            Ok(loaded) => {
+                self.textarea = TextArea::new(text_to_lines(&loaded.text));
                 self.apply_editor_theme();
-                self.path = Some(path.clone());
-                self.modified = false;
-                self.set_status(format!("Opened {}", path.display()));
+                if loaded.imported {
+                    // Imported WordStar → unsaved Markdown; keep the original intact.
+                    let md = path.with_extension("md");
+                    self.set_status(format!(
+                        "Imported {} — save writes {}",
+                        path.display(),
+                        md.display()
+                    ));
+                    self.path = Some(md);
+                    self.modified = true;
+                } else {
+                    self.set_status(format!("Opened {}", path.display()));
+                    self.path = Some(path);
+                    self.modified = false;
+                }
             }
             Err(e) => self.set_status(format!("Open failed: {e}")),
         }
@@ -1450,6 +1463,15 @@ pub struct CursorMetrics {
 enum OverlayKind {
     Preview,
     Help,
+}
+
+/// Split loaded document text into editor lines (never empty).
+fn text_to_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        vec![String::new()]
+    } else {
+        text.lines().map(str::to_owned).collect()
+    }
 }
 
 /// Escape regex metacharacters so a user's search term is matched literally

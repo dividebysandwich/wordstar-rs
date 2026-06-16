@@ -323,5 +323,14 @@ fonts, and point sizes use the bracketed-attribute notation shown above, and
 document defaults live in an optional YAML header. Everything is plain text you
 can read, search, and version-control like any other manuscript.
 
-> Reading original WordStar binary `.WS`/`.DOC` files is on the roadmap; today
-> the editor reads and writes Markdown.
+### Importing classic WordStar files
+
+Open an original WordStar document (a `.WS` file, or any file beginning with the
+WordStar header) and it is **imported automatically** — the binary header is
+skipped, word-wrap soft returns are re-flowed, the high-bit word markers are
+cleaned up, and inline effects (bold, italic, underline, strikeout) become their
+Markdown equivalents. Dot commands (`.PA`, `.LM`, …) are dropped.
+
+To protect your originals, an import opens as an **unsaved Markdown document**:
+`CHAPTER.WS` becomes `CHAPTER.md` on save, leaving the `.WS` file untouched.
+(Text is limited to the Latin-1 / Windows-1252 character set.)
