@@ -405,13 +405,12 @@ impl Layout {
         self.ops.push(Op::SetTextMatrix {
             matrix: TextMatrix::Translate(Pt(x), Pt(FOOTER_Y)),
         });
-        self.ops.push(Op::SetFontSizeBuiltinFont {
+        self.ops.push(Op::SetFont {
+            font: PdfFontHandle::Builtin(BuiltinFont::Courier),
             size: Pt(9.0),
-            font: BuiltinFont::Courier,
         });
-        self.ops.push(Op::WriteTextBuiltinFont {
+        self.ops.push(Op::ShowText {
             items: vec![TextItem::Text(label)],
-            font: BuiltinFont::Courier,
         });
         self.ops.push(Op::EndTextSection);
 
@@ -477,13 +476,12 @@ impl Layout {
         let mut sx = x;
         for s in segs {
             let font = courier(s.bold, s.italic);
-            self.ops.push(Op::SetFontSizeBuiltinFont {
+            self.ops.push(Op::SetFont {
+                font: PdfFontHandle::Builtin(font),
                 size: Pt(size),
-                font,
             });
-            self.ops.push(Op::WriteTextBuiltinFont {
+            self.ops.push(Op::ShowText {
                 items: vec![TextItem::Text(sanitize(&s.text))],
-                font,
             });
             let w = s.text.chars().count() as f32 * char_w(size);
             if s.underline {

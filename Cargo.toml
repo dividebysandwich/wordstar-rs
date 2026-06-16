@@ -1,6 +1,6 @@
 [package]
 name = "wordstar-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A faithful DOS WordStar 7 clone for the terminal, written in Rust."
 authors = ["dividebysandwich <josef.jahn@gmail.com>"]
@@ -12,17 +12,17 @@ categories = ["command-line-utilities", "text-editors"]
 
 [dependencies]
 anyhow = "1.0.102"
-cosmic-text = "0.14"
+cosmic-text = "0.19.0"
 crossterm = "0.29"
 dirs = "6.0.0"
 image = { version = "0.25", default-features = false }
-printpdf = { version = "0.8", default-features = false }
+printpdf = { version = "0.9.1", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"] }
 ratatui-textarea = { version = "0.9", features = ["crossterm", "search"] }
 unicode-segmentation = "1"
-unicode-width = "0.2"
+unicode-width = "0.2.2"
 
 # Strip and optimize release binaries (smaller archives, .deb and .msi payloads).
 [profile.release]

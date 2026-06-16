@@ -184,7 +184,7 @@ fn text_strip(
     indent: f32,
     color: [u8; 3],
 ) -> RgbaImage {
-    let buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent);
+    let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent);
     let h = buffer
         .layout_runs()
         .map(|r| r.line_top + r.line_height)
@@ -292,14 +292,13 @@ fn text_buffer(
     wrap_w: f32,
 ) -> Buffer {
     let mut buffer = Buffer::new(fs, Metrics::new(size, size * LINE));
-    buffer.set_size(fs, Some(wrap_w.max(50.0)), None);
+    buffer.set_size(Some(wrap_w.max(50.0)), None);
     let default = Attrs::new().family(family);
     let spans: Vec<(String, Attrs)> = segs
         .iter()
         .map(|s| (s.text.clone(), seg_attrs(s, family)))
         .collect();
     buffer.set_rich_text(
-        fs,
         spans.iter().map(|(t, a)| (t.as_str(), a.clone())),
         &default,
         Shaping::Advanced,
