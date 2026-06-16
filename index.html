@@ -4,8 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WordStar-rs</title>
-    <link data-trunk rel="rust" data-target-name="wordstar_rs" data-type="main" data-wasm-opt="z" />
-    <link data-trunk rel="copy-dir" href="assets" />
+    <!-- `data-wasm-opt-params="-all"` lets wasm-opt accept the wasm features
+         modern rustc emits by default (bulk-memory, non-trapping float-to-int,
+         sign-ext, …); without it the release optimization fails to validate. -->
+    <link
+      data-trunk
+      rel="rust"
+      data-target-name="wordstar_rs"
+      data-type="main"
+      data-wasm-opt="z"
+      data-wasm-opt-params="-all"
+    />
     <style>
       html,
       body {

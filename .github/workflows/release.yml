@@ -153,11 +153,60 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # WebAssembly bundle (Ratzilla + Trunk): downloadable .zip + GitHub Pages
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web (WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      # `--public-url ./` keeps every asset reference relative, so the same
+      # bundle works both unzipped on any static host and under the GitHub Pages
+      # project subpath (https://<user>.github.io/<repo>/). Trunk downloads the
+      # matching wasm-bindgen and wasm-opt automatically.
+      - name: Build site
+        run: trunk build --release --locked --public-url ./
+
+      - name: Package zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="${BIN_NAME}-${version}-web"
+          cp -r dist "$stage"
+          zip -r "${stage}.zip" "$stage" > /dev/null
+          echo "ASSET=${stage}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+      # Separate artifact consumed by the deploy-pages job below.
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  # ---------------------------------------------------------------------------
   # Publish: gather every artifact and attach it to the GitHub Release
   # ---------------------------------------------------------------------------
   release:
     name: Publish release
-    needs: [archive, msi, deb]
+    needs: [archive, msi, deb, web]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -168,6 +217,11 @@ jobs:
         with:
           path: dist
 
+      # The Pages bundle is deployed by `deploy-pages`, not attached as a
+      # release download (it is a tarball in GitHub's Pages format).
+      - name: Drop the Pages artifact
+        run: rm -rf dist/github-pages
+
       - name: List artifacts
         run: find dist -type f | sort
 
@@ -177,3 +231,25 @@ jobs:
           files: dist/**/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  # ---------------------------------------------------------------------------
+  # Deploy the WASM bundle to GitHub Pages (on tags; or manual dispatch to test)
+  # ---------------------------------------------------------------------------
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: web
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
