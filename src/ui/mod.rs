@@ -106,7 +106,17 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let Some(c) = app.confirm.as_ref() else {
         return;
     };
-    let width = (c.message.chars().count().max(28) + 4).min(area.width as usize) as u16;
+
+    // Choices rendered as ASCII buttons, e.g. `[ Yes ]  [ No ]  [ Cancel ]`,
+    // with the accelerator key highlighted.
+    let buttons: &[(&str, &str)] = match c.action {
+        crate::app::ConfirmAction::SaveBeforeQuit => &[("Y", "es"), ("N", "o"), ("C", "ancel")],
+        _ => &[("Y", "es"), ("N", "o")],
+    };
+    let button_line = Line::from(ascii_buttons(buttons));
+
+    let content_w = c.message.chars().count().max(button_line.width()).max(24);
+    let width = (content_w + 4).min(area.width as usize) as u16;
     let rect = centered(area, width, 5);
     frame.render_widget(Clear, rect);
     let block = Block::default()
@@ -116,31 +126,35 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let key = Style::default()
-        .fg(ratatui::style::Color::Blue)
-        .add_modifier(Modifier::BOLD);
-    let options = match c.action {
-        crate::app::ConfirmAction::SaveBeforeQuit => vec![
-            Span::styled("Y", key),
-            Span::raw(")es save     "),
-            Span::styled("N", key),
-            Span::raw(")o discard     "),
-            Span::styled("Esc", key),
-            Span::raw(" cancel"),
-        ],
-        _ => vec![
-            Span::styled("Y", key),
-            Span::raw(")es     "),
-            Span::styled("N", key),
-            Span::raw(")o     (Esc cancels)"),
-        ],
-    };
     let body = vec![
         Line::from(Span::raw(c.message.clone())),
         Line::default(),
-        Line::from(options),
+        button_line,
     ];
-    frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
+    frame.render_widget(
+        Paragraph::new(body)
+            .alignment(Alignment::Center)
+            .style(theme::status_bar()),
+        inner,
+    );
+}
+
+/// Build a row of ASCII buttons like `[ Yes ]  [ No ]`, each `(hotkey, rest)`
+/// with the hotkey letter emphasized.
+fn ascii_buttons(buttons: &[(&str, &str)]) -> Vec<Span<'static>> {
+    let key = Style::default()
+        .fg(ratatui::style::Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = Vec::new();
+    for (i, (hot, rest)) in buttons.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::raw("[ "));
+        spans.push(Span::styled((*hot).to_string(), key));
+        spans.push(Span::raw(format!("{rest} ]")));
+    }
+    spans
 }
 
 fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
@@ -703,9 +717,24 @@ mod tests {
         assert!(screen.contains("Confirm"), "modal frame missing:\n{screen}");
         assert!(screen.contains("Overwrite?"), "message missing");
         assert!(
-            screen.contains(")es") && screen.contains(")o"),
-            "Y/N options missing"
+            screen.contains("[ Yes ]") && screen.contains("[ No ]"),
+            "ASCII buttons missing:\n{screen}"
         );
+    }
+
+    #[test]
+    fn quit_modal_has_three_ascii_buttons() {
+        use crate::app::{ConfirmAction, ConfirmState};
+        let mut app = App::new(None).unwrap();
+        app.confirm = Some(ConfirmState {
+            message: "Save changes before quitting?".into(),
+            action: ConfirmAction::SaveBeforeQuit,
+        });
+        app.mode = Mode::Confirm;
+        let screen = render_app(&app, 80, 16);
+        assert!(screen.contains("[ Yes ]"), "Yes button missing:\n{screen}");
+        assert!(screen.contains("[ No ]"), "No button missing");
+        assert!(screen.contains("[ Cancel ]"), "Cancel button missing");
     }
 }
 
