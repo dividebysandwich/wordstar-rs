@@ -51,11 +51,23 @@ fn courier(bold: bool, italic: bool) -> BuiltinFont {
 }
 
 /// A styled run of text on one line. Shared with the graphical preview.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Seg {
     pub(crate) text: String,
     pub(crate) bold: bool,
     pub(crate) italic: bool,
+    pub(crate) underline: bool,
+    pub(crate) strike: bool,
+}
+
+impl Seg {
+    /// An unstyled run of text.
+    pub(crate) fn plain(text: impl Into<String>) -> Seg {
+        Seg {
+            text: text.into(),
+            ..Seg::default()
+        }
+    }
 }
 
 /// A laid-out-able block of content. Shared with the graphical preview.
@@ -106,12 +118,8 @@ pub(crate) fn strip_frontmatter(src: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn parse(src: &str) -> Vec<Block> {
-    // Drop WordStar dot commands (print directives, not body text).
-    let src: String = src
-        .lines()
-        .filter(|l| !is_dot_command(l))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Drop dot commands and rewrite pandoc attribute spans (underline → sentinels).
+    let src = crate::attributes::prepare_render_source(src);
     let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     let mut b = Builder::default();
     for event in Parser::new_ext(&src, opts) {
@@ -120,18 +128,14 @@ pub(crate) fn parse(src: &str) -> Vec<Block> {
     b.blocks
 }
 
-/// True for a WordStar dot command (a `.` at column 1 followed by a letter).
-fn is_dot_command(line: &str) -> bool {
-    let mut chars = line.chars();
-    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-}
-
 #[derive(Default)]
 struct Builder {
     blocks: Vec<Block>,
     inline: Vec<Seg>,
     bold: u32,
     italic: u32,
+    strike: u32,
+    underline: u32,
     heading: Option<u8>,
     list_stack: Vec<Option<u64>>,
     in_item: bool,
@@ -164,7 +168,7 @@ impl Builder {
                 if self.in_code {
                     self.code_buf.push_str(&t);
                 } else {
-                    self.push_seg(&t);
+                    self.push_text(&t);
                 }
             }
             Event::Code(t) => self.push_seg(&t),
@@ -186,6 +190,7 @@ impl Builder {
             Tag::Heading { level, .. } => self.heading = Some(level as u8),
             Tag::Strong => self.bold += 1,
             Tag::Emphasis => self.italic += 1,
+            Tag::Strikethrough => self.strike += 1,
             Tag::CodeBlock(_) => {
                 self.in_code = true;
                 self.code_buf.clear();
@@ -239,6 +244,7 @@ impl Builder {
             }
             TagEnd::Strong => self.bold = self.bold.saturating_sub(1),
             TagEnd::Emphasis => self.italic = self.italic.saturating_sub(1),
+            TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::CodeBlock => {
                 self.in_code = false;
                 let lines: Vec<String> = self
@@ -271,21 +277,48 @@ impl Builder {
         self.in_item = false;
     }
 
+    /// Push text that may contain underline sentinels, toggling underline.
+    fn push_text(&mut self, text: &str) {
+        use crate::attributes::{UNDERLINE_END, UNDERLINE_START};
+        let mut buf = String::new();
+        for ch in text.chars() {
+            match ch {
+                UNDERLINE_START | UNDERLINE_END => {
+                    if !buf.is_empty() {
+                        self.push_seg(&std::mem::take(&mut buf));
+                    }
+                    if ch == UNDERLINE_START {
+                        self.underline += 1;
+                    } else {
+                        self.underline = self.underline.saturating_sub(1);
+                    }
+                }
+                _ => buf.push(ch),
+            }
+        }
+        if !buf.is_empty() {
+            self.push_seg(&buf);
+        }
+    }
+
     fn push_seg(&mut self, text: &str) {
-        let bold = self.bold > 0;
-        let italic = self.italic > 0;
+        let seg = Seg {
+            text: text.to_string(),
+            bold: self.bold > 0,
+            italic: self.italic > 0,
+            underline: self.underline > 0,
+            strike: self.strike > 0,
+        };
         if let Some(last) = self.inline.last_mut()
-            && last.bold == bold
-            && last.italic == italic
+            && last.bold == seg.bold
+            && last.italic == seg.italic
+            && last.underline == seg.underline
+            && last.strike == seg.strike
         {
             last.text.push_str(text);
             return;
         }
-        self.inline.push(Seg {
-            text: text.to_string(),
-            bold,
-            italic,
-        });
+        self.inline.push(seg);
     }
 
     fn table_event(&mut self, event: Event) {
@@ -309,7 +342,13 @@ impl Builder {
                     rows: t.rows,
                 });
             }
-            Event::Text(t2) | Event::Code(t2) => t.cell.push_str(&t2),
+            Event::Text(t2) | Event::Code(t2) => {
+                use crate::attributes::{UNDERLINE_END, UNDERLINE_START};
+                t.cell.extend(
+                    t2.chars()
+                        .filter(|&c| c != UNDERLINE_START && c != UNDERLINE_END),
+                );
+            }
             Event::SoftBreak | Event::HardBreak => t.cell.push(' '),
             _ => {}
         }
@@ -325,6 +364,10 @@ struct Layout {
     ops: Vec<Op>,
     y: f32,
     page_no: usize,
+    /// Underline / strikethrough rules to stroke on the current page, as
+    /// `(x0, x1, y)` in PDF points. Drawn after the text section (graphics
+    /// operators are not allowed inside a text object).
+    decorations: Vec<(f32, f32, f32)>,
 }
 
 impl Layout {
@@ -334,6 +377,7 @@ impl Layout {
             ops: Vec::new(),
             y: 0.0,
             page_no: 0,
+            decorations: Vec::new(),
         };
         l.start_page();
         l
@@ -370,6 +414,44 @@ impl Layout {
             font: BuiltinFont::Courier,
         });
         self.ops.push(Op::EndTextSection);
+
+        // Stroke underline / strikethrough rules (outside the text section).
+        let rules = std::mem::take(&mut self.decorations);
+        if !rules.is_empty() {
+            self.ops.push(Op::SetOutlineColor {
+                col: Color::Rgb(Rgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    icc_profile: None,
+                }),
+            });
+            self.ops.push(Op::SetOutlineThickness { pt: Pt(0.6) });
+            for (x0, x1, y) in rules {
+                self.ops.push(Op::DrawLine {
+                    line: Line {
+                        points: vec![
+                            LinePoint {
+                                p: Point {
+                                    x: Pt(x0),
+                                    y: Pt(y),
+                                },
+                                bezier: false,
+                            },
+                            LinePoint {
+                                p: Point {
+                                    x: Pt(x1),
+                                    y: Pt(y),
+                                },
+                                bezier: false,
+                            },
+                        ],
+                        is_closed: false,
+                    },
+                });
+            }
+        }
+
         let ops = std::mem::take(&mut self.ops);
         self.pages.push(PdfPage::new(Mm(210.0), Mm(297.0), ops));
     }
@@ -392,6 +474,7 @@ impl Layout {
         self.ops.push(Op::SetTextMatrix {
             matrix: TextMatrix::Translate(Pt(x), Pt(self.y)),
         });
+        let mut sx = x;
         for s in segs {
             let font = courier(s.bold, s.italic);
             self.ops.push(Op::SetFontSizeBuiltinFont {
@@ -402,6 +485,14 @@ impl Layout {
                 items: vec![TextItem::Text(sanitize(&s.text))],
                 font,
             });
+            let w = s.text.chars().count() as f32 * char_w(size);
+            if s.underline {
+                self.decorations.push((sx, sx + w, self.y - size * 0.12));
+            }
+            if s.strike {
+                self.decorations.push((sx, sx + w, self.y + size * 0.30));
+            }
+            sx += w;
         }
         self.y -= lh;
     }
@@ -413,9 +504,8 @@ impl Layout {
                 let bolded: Vec<Seg> = segs
                     .iter()
                     .map(|s| Seg {
-                        text: s.text.clone(),
                         bold: true,
-                        italic: s.italic,
+                        ..s.clone()
                     })
                     .collect();
                 for line in wrap(&bolded, max_chars(size)) {
@@ -439,11 +529,7 @@ impl Layout {
                 let cont_x = indent + marker_w as f32 * char_w(BODY);
                 for (i, line) in lines.iter().enumerate() {
                     if i == 0 {
-                        let mut first = vec![Seg {
-                            text: marker.clone(),
-                            bold: false,
-                            italic: false,
-                        }];
+                        let mut first = vec![Seg::plain(marker.clone())];
                         first.extend(line.iter().cloned());
                         self.line(indent, &first, BODY);
                     } else {
@@ -451,60 +537,28 @@ impl Layout {
                     }
                 }
                 if lines.is_empty() {
-                    self.line(
-                        indent,
-                        &[Seg {
-                            text: marker.clone(),
-                            bold: false,
-                            italic: false,
-                        }],
-                        BODY,
-                    );
+                    self.line(indent, &[Seg::plain(marker.clone())], BODY);
                 }
             }
             Block::Code(lines) => {
                 for raw in lines {
                     for chunk in hard_wrap(raw, max_chars(BODY)) {
-                        self.line(
-                            MARGIN,
-                            &[Seg {
-                                text: chunk,
-                                bold: false,
-                                italic: false,
-                            }],
-                            BODY,
-                        );
+                        self.line(MARGIN, &[Seg::plain(chunk)], BODY);
                     }
                 }
             }
             Block::Quote(segs) => {
                 let avail = max_chars(BODY).saturating_sub(2).max(8);
                 for line in wrap(segs, avail) {
-                    let mut row = vec![Seg {
-                        text: "> ".into(),
-                        bold: false,
-                        italic: false,
-                    }];
+                    let mut row = vec![Seg::plain("> ")];
                     for s in line {
-                        row.push(Seg {
-                            text: s.text,
-                            bold: s.bold,
-                            italic: true,
-                        });
+                        row.push(Seg { italic: true, ..s });
                     }
                     self.line(MARGIN, &row, BODY);
                 }
             }
             Block::Rule => {
-                self.line(
-                    MARGIN,
-                    &[Seg {
-                        text: "-".repeat(max_chars(BODY)),
-                        bold: false,
-                        italic: false,
-                    }],
-                    BODY,
-                );
+                self.line(MARGIN, &[Seg::plain("-".repeat(max_chars(BODY)))], BODY);
             }
             Block::Table { header, rows } => self.table(header, rows),
         }
@@ -565,7 +619,7 @@ impl Layout {
         let mono = |text: String, bold: bool| Seg {
             text,
             bold,
-            italic: false,
+            ..Seg::default()
         };
 
         self.line(MARGIN, &[mono(border.clone(), false)], BODY);
@@ -605,7 +659,7 @@ fn wrap(segs: &[Seg], max: usize) -> Vec<Vec<Seg>> {
                     col = 0;
                 }
                 let add_space = col > 0;
-                push_word(&mut line, &piece, seg.bold, seg.italic, add_space);
+                push_word(&mut line, &piece, seg, add_space);
                 col += if add_space { plen + 1 } else { plen };
             }
         }
@@ -616,20 +670,28 @@ fn wrap(segs: &[Seg], max: usize) -> Vec<Vec<Seg>> {
     lines
 }
 
-fn push_word(line: &mut Vec<Seg>, word: &str, bold: bool, italic: bool, add_space: bool) {
+fn push_word(line: &mut Vec<Seg>, word: &str, style: &Seg, add_space: bool) {
     let text = if add_space {
         format!(" {word}")
     } else {
         word.to_string()
     };
     if let Some(last) = line.last_mut()
-        && last.bold == bold
-        && last.italic == italic
+        && last.bold == style.bold
+        && last.italic == style.italic
+        && last.underline == style.underline
+        && last.strike == style.strike
     {
         last.text.push_str(&text);
         return;
     }
-    line.push(Seg { text, bold, italic });
+    line.push(Seg {
+        text,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        strike: style.strike,
+    });
 }
 
 /// Break a string into chunks of at most `max` characters (for overlong words
@@ -676,6 +738,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_flags_underline_and_strikethrough() {
+        let blocks = parse("plain [under]{.underline} and ~~struck~~ text");
+        let segs = match &blocks[0] {
+            Block::Para(s) => s,
+            other => panic!(
+                "expected paragraph, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        };
+        let find = |needle: &str| segs.iter().find(|s| s.text.contains(needle)).unwrap();
+        assert!(find("under").underline, "underline flag missing");
+        assert!(!find("under").strike);
+        assert!(find("struck").strike, "strike flag missing");
+        assert!(!find("struck").underline);
+        // The sentinels and pandoc markers never reach the rendered text.
+        for s in segs {
+            assert!(!s.text.contains('\u{E000}') && !s.text.contains('\u{E001}'));
+            assert!(!s.text.contains("underline"));
+        }
+    }
+
+    #[test]
+    fn export_with_decorations_is_valid_pdf() {
+        // Exercises the underline/strikethrough line-drawing path.
+        let md = "A [line]{.underline} and ~~gone~~ here.\n";
+        let bytes = export(md, "Deco");
+        assert!(bytes.starts_with(b"%PDF-"));
+        assert!(bytes.len() > 500);
+    }
+
+    #[test]
     fn frontmatter_is_stripped() {
         let md = "---\nfont: Courier\nsize: 12\n---\nHello body.\n";
         assert_eq!(strip_frontmatter(md).trim(), "Hello body.");
@@ -683,11 +776,7 @@ mod tests {
 
     #[test]
     fn wrap_breaks_long_paragraph() {
-        let seg = Seg {
-            text: "word ".repeat(40).trim().to_string(),
-            bold: false,
-            italic: false,
-        };
+        let seg = Seg::plain("word ".repeat(40).trim().to_string());
         let lines = wrap(&[seg], 20);
         assert!(lines.len() > 1, "expected multiple wrapped lines");
         for l in &lines {

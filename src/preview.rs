@@ -13,18 +13,15 @@ use ratatui::text::{Line, Span};
 
 /// Render markdown source into styled lines.
 ///
-/// WordStar dot commands (`.he`, `.pa`, …) are print directives, not body text,
-/// so they are dropped before rendering rather than shown verbatim.
+/// The source is first run through [`crate::attributes::prepare_render_source`],
+/// which drops WordStar dot commands and rewrites pandoc attribute spans (so
+/// `[text]{.underline}` renders underlined rather than showing its markers).
 pub fn render(source: &str) -> Vec<Line<'static>> {
-    let filtered: String = source
-        .lines()
-        .filter(|l| !is_dot_command(l))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let prepared = crate::attributes::prepare_render_source(source);
     let mut r = Renderer::default();
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(&filtered, options) {
+    for event in Parser::new_ext(&prepared, options) {
         r.handle(event);
     }
     r.flush_line();
@@ -32,12 +29,6 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
         r.lines.push(Line::default());
     }
     r.lines
-}
-
-/// True for a WordStar dot command (a `.` at column 1 followed by a letter).
-fn is_dot_command(line: &str) -> bool {
-    let mut chars = line.chars();
-    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
 #[derive(Default)]
@@ -48,6 +39,7 @@ struct Renderer {
     bold: u32,
     italic: u32,
     strike: u32,
+    underline: u32,
     link: u32,
     /// Heading level currently open, if any.
     heading: Option<HeadingLevel>,
@@ -252,8 +244,28 @@ impl Renderer {
             }
             return;
         }
-        self.current
-            .push(Span::styled(text.to_string(), self.inline_style()));
+        // Split on the underline sentinels, toggling underline between runs.
+        use crate::attributes::{UNDERLINE_END, UNDERLINE_START};
+        let mut buf = String::new();
+        for ch in text.chars() {
+            match ch {
+                UNDERLINE_START | UNDERLINE_END => {
+                    if !buf.is_empty() {
+                        self.current
+                            .push(Span::styled(std::mem::take(&mut buf), self.inline_style()));
+                    }
+                    if ch == UNDERLINE_START {
+                        self.underline += 1;
+                    } else {
+                        self.underline = self.underline.saturating_sub(1);
+                    }
+                }
+                _ => buf.push(ch),
+            }
+        }
+        if !buf.is_empty() {
+            self.current.push(Span::styled(buf, self.inline_style()));
+        }
     }
 
     fn inline_style(&self) -> Style {
@@ -282,6 +294,9 @@ impl Renderer {
         }
         if self.strike > 0 {
             style = style.add_modifier(Modifier::CROSSED_OUT);
+        }
+        if self.underline > 0 {
+            style = style.add_modifier(Modifier::UNDERLINED);
         }
         style
     }
@@ -466,6 +481,34 @@ mod tests {
         let out = flat(&render("See [the site](https://example.com)."));
         assert!(out.contains("the site"), "link text missing:\n{out}");
         assert!(out.contains("https://example.com"), "url missing");
+    }
+
+    #[test]
+    fn renders_underline_and_strikethrough() {
+        // Underline span and strikethrough should carry the matching modifiers.
+        let lines = render("a [hi]{.underline} ~~bye~~ c");
+        let mut saw_underline = false;
+        let mut saw_strike = false;
+        for line in &lines {
+            for span in &line.spans {
+                if span.content.contains("hi")
+                    && span.style.add_modifier.contains(Modifier::UNDERLINED)
+                {
+                    saw_underline = true;
+                }
+                if span.content.contains("bye")
+                    && span.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                {
+                    saw_strike = true;
+                }
+            }
+        }
+        assert!(saw_underline, "underline modifier missing");
+        assert!(saw_strike, "strikethrough modifier missing");
+        // The pandoc markers must not appear as literal text.
+        let out = flat(&lines);
+        assert!(!out.contains("{.underline}"), "markers leaked:\n{out}");
+        assert!(out.contains("hi") && out.contains("bye"));
     }
 
     #[test]

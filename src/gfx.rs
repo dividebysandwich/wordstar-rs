@@ -127,9 +127,8 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             let bold: Vec<Seg> = segs
                 .iter()
                 .map(|s| Seg {
-                    text: s.text.clone(),
                     bold: true,
-                    italic: s.italic,
+                    ..s.clone()
                 })
                 .collect();
             text_strip(
@@ -149,40 +148,27 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             segs,
         } => {
             let indent = (*depth as f32) * 28.0;
-            let mut all = vec![Seg {
-                text: marker.clone(),
-                bold: false,
-                italic: false,
-            }];
+            let mut all = vec![Seg::plain(marker.clone())];
             all.extend(segs.iter().cloned());
             text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT)
         }
         Block::Code(lines) => {
-            let seg = Seg {
-                text: lines.join("\n"),
-                bold: false,
-                italic: false,
-            };
+            let seg = Seg::plain(lines.join("\n"));
             text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE)
         }
         Block::Quote(segs) => {
             let italic: Vec<Seg> = segs
                 .iter()
                 .map(|s| Seg {
-                    text: s.text.clone(),
-                    bold: s.bold,
                     italic: true,
+                    ..s.clone()
                 })
                 .collect();
             text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE)
         }
         Block::Rule => rule_strip(),
         Block::Table { header, rows } => {
-            let seg = Seg {
-                text: ascii_table(header, rows),
-                bold: false,
-                italic: false,
-            };
+            let seg = Seg::plain(ascii_table(header, rows));
             text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT)
         }
     }
@@ -210,7 +196,40 @@ fn text_strip(
     buffer.draw(fs, cache, col, |gx, gy, _, _, c| {
         blend(&mut strip, indent as i32 + gx, gy, c);
     });
+
+    // Underline / strikethrough: stroke a rule under (or through) each glyph
+    // whose metadata is flagged. `cosmic-text` draws glyphs only, so we add the
+    // decoration lines ourselves.
+    let rule = [color[0], color[1], color[2], 255];
+    for run in buffer.layout_runs() {
+        for g in run.glyphs {
+            if g.metadata & META_UNDERLINE == 0 && g.metadata & META_STRIKE == 0 {
+                continue;
+            }
+            let x0 = (indent + g.x).round() as i32;
+            let x1 = (indent + g.x + g.w).round() as i32;
+            if g.metadata & META_UNDERLINE != 0 {
+                let y = (run.line_y + size * 0.12).round() as i32;
+                decoration(&mut strip, x0, x1, y, rule);
+            }
+            if g.metadata & META_STRIKE != 0 {
+                let y = (run.line_y - size * 0.30).round() as i32;
+                decoration(&mut strip, x0, x1, y, rule);
+            }
+        }
+    }
     strip
+}
+
+/// Draw a 1px horizontal rule from `x0` to `x1` at row `y` in `color`.
+fn decoration(img: &mut RgbaImage, x0: i32, x1: i32, y: i32, color: [u8; 4]) {
+    if y < 0 || y >= img.height() as i32 {
+        return;
+    }
+    let (lo, hi) = (x0.max(0), x1.min(img.width() as i32));
+    for x in lo..hi {
+        img.put_pixel(x as u32, y as u32, Rgba(color));
+    }
 }
 
 fn rule_strip() -> RgbaImage {
@@ -290,6 +309,10 @@ fn text_buffer(
     buffer
 }
 
+/// Glyph metadata bits carrying decoration state through `cosmic-text` layout.
+const META_UNDERLINE: usize = 1;
+const META_STRIKE: usize = 2;
+
 fn seg_attrs(seg: &Seg, family: Family<'static>) -> Attrs<'static> {
     let mut a = Attrs::new().family(family);
     if seg.bold {
@@ -298,7 +321,14 @@ fn seg_attrs(seg: &Seg, family: Family<'static>) -> Attrs<'static> {
     if seg.italic {
         a = a.style(Style::Italic);
     }
-    a
+    let mut meta = 0;
+    if seg.underline {
+        meta |= META_UNDERLINE;
+    }
+    if seg.strike {
+        meta |= META_STRIKE;
+    }
+    a.metadata(meta)
 }
 
 /// Alpha-blend a coverage pixel onto the (opaque) paper image.

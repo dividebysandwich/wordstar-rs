@@ -421,7 +421,11 @@ mod tests {
 
     impl MenuState {
         fn active_index_pub(&self) -> usize {
-            if self.sub_open { self.sub_item } else { self.item }
+            if self.sub_open {
+                self.sub_item
+            } else {
+                self.item
+            }
         }
     }
 }

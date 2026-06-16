@@ -76,6 +76,70 @@ pub fn line_attributes(line: &str) -> Vec<RunAttributes> {
     result
 }
 
+/// Private-use sentinels that wrap underlined text in the source handed to the
+/// formatted renderers (preview / PDF / graphical preview). They never occur in
+/// real documents, so the renderers can toggle underline on seeing them.
+pub const UNDERLINE_START: char = '\u{E000}';
+pub const UNDERLINE_END: char = '\u{E001}';
+
+/// True if `line` is a WordStar dot command (a `.` at column 1 followed by a
+/// letter, e.g. `.he`, `.pa`). Such lines are print directives, not body text.
+pub fn is_dot_command(line: &str) -> bool {
+    let mut chars = line.chars();
+    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// Preprocess raw Markdown for the formatted renderers: drop dot-command lines,
+/// and rewrite pandoc attribute spans so the renderers can show them.
+///
+/// `[text]{.underline}` becomes `text` wrapped in [`UNDERLINE_START`] /
+/// [`UNDERLINE_END`] sentinels (turned into a real underline downstream).
+/// `[text]{font=… size=…}` collapses to its visible `text` — terminals and the
+/// monospaced PDF can't change font, but the markers must not leak as literals.
+/// Strikethrough (`~~…~~`) is standard Markdown and passes through untouched.
+pub fn prepare_render_source(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut first = true;
+    for line in src.lines() {
+        if is_dot_command(line) {
+            continue;
+        }
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        rewrite_spans(line, &mut out);
+    }
+    out
+}
+
+/// Append `line` to `out`, rewriting any `[text]{attrs}` attribute spans.
+fn rewrite_spans(line: &str, out: &mut String) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '['
+            && let Some((rb, bo, bc)) = find_span(&chars, i)
+        {
+            let inner: String = chars[i + 1..rb].iter().collect();
+            let attr_str: String = chars[bo + 1..bc].iter().collect();
+            let mut attrs = RunAttributes::default();
+            apply_attr_tokens(&mut attrs, &attr_str);
+            if attrs.underline {
+                out.push(UNDERLINE_START);
+                out.push_str(&inner);
+                out.push(UNDERLINE_END);
+            } else {
+                out.push_str(&inner);
+            }
+            i = bc + 1;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+}
+
 /// Locate an attribute span `[ … ]{ … }` starting at `start` (a `[`).
 ///
 /// Returns `(close_bracket, brace_open, brace_close)` character indices, or
@@ -252,6 +316,35 @@ mod tests {
 
     fn at(line: &str, col: usize) -> RunAttributes {
         line_attributes(line)[col].clone()
+    }
+
+    #[test]
+    fn prepare_wraps_underline_and_strips_font() {
+        let out = prepare_render_source("a [hi]{.underline} b [yo]{font=\"Courier\"} c");
+        // Underline span: text kept, wrapped in sentinels; brackets/attrs gone.
+        assert!(
+            out.contains(&format!("{UNDERLINE_START}hi{UNDERLINE_END}")),
+            "got: {out:?}"
+        );
+        // Font span: only the visible text survives.
+        assert!(out.contains("yo"), "got: {out:?}");
+        assert!(!out.contains("font="), "attrs leaked: {out:?}");
+        assert!(!out.contains('['), "brackets leaked: {out:?}");
+    }
+
+    #[test]
+    fn prepare_drops_dot_command_lines() {
+        let out = prepare_render_source(".he Title\nBody\n.pa\nMore");
+        assert!(!out.contains("Title"), "dot command leaked: {out:?}");
+        assert!(!out.contains(".pa"), "dot command leaked: {out:?}");
+        assert!(out.contains("Body") && out.contains("More"));
+    }
+
+    #[test]
+    fn prepare_leaves_links_untouched() {
+        // `[text](url)` is a real link, not an attribute span.
+        let out = prepare_render_source("see [the site](https://example.com)");
+        assert_eq!(out, "see [the site](https://example.com)");
     }
 
     #[test]

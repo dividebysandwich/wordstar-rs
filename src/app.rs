@@ -1365,7 +1365,7 @@ impl App {
         let mut in_para = false;
         let lines = self.textarea.lines();
         for line in lines {
-            if is_dot_command(line) {
+            if crate::attributes::is_dot_command(line) {
                 continue;
             }
             let text = crate::attributes::strip_inline_markers(line);
@@ -1890,13 +1890,6 @@ enum OverlayKind {
 /// Approximate text lines per printed page (9" at 6 lines/inch), used for the
 /// status-line page metric and "go to page".
 const LINES_PER_PAGE: usize = 54;
-
-/// True if `line` is a WordStar dot command (a `.` at column 1 followed by a
-/// letter, e.g. `.he`, `.pa`). Such lines are print directives, not body text.
-pub fn is_dot_command(line: &str) -> bool {
-    let mut chars = line.chars();
-    chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
-}
 
 /// Split loaded document text into editor lines (never empty).
 fn text_to_lines(text: &str) -> Vec<String> {
