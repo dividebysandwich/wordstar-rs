@@ -14,6 +14,17 @@
         background: #0000aa;
         overflow: hidden;
       }
+      /* Ratzilla's DomBackend renders each terminal row as a <pre>. Browsers
+         give <pre> a default `margin: 1em 0`, which inserts a blank gap between
+         every row (and makes the actual row height exceed the measured cell
+         height). Zero it so rows are flush, matching the cell-size probe. */
+      #grid,
+      #grid pre {
+        margin: 0;
+        padding: 0;
+        border: 0;
+        line-height: normal;
+      }
     </style>
   </head>
   <body></body>
