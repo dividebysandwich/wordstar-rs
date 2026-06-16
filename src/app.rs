@@ -134,6 +134,8 @@ pub struct App {
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Whether a real graphics protocol (Kitty/iTerm2/Sixel) is available.
     pub graphics: bool,
+    /// In-progress incremental rasterization job (graphical preview loading).
+    pub preview_job: Option<crate::gfx::Job>,
     /// Rasterized pages of the document (graphical preview).
     pub preview_pages: Vec<image::RgbaImage>,
     /// Per-page encoded protocols, built lazily and reused (the zoom == 1 view).
@@ -197,6 +199,7 @@ impl App {
             align: AlignChoice::Left,
             picker: None,
             graphics: false,
+            preview_job: None,
             preview_pages: Vec::new(),
             preview_page_protocols: RefCell::new(Vec::new()),
             preview_zoom_protocol: RefCell::new(None),
@@ -628,11 +631,11 @@ impl App {
             self.preview_page_protocols.borrow_mut().clear();
             *self.preview_zoom_protocol.borrow_mut() = None;
             self.preview_view_key.set(None);
+            self.preview_job = None;
             if self.graphics {
-                self.preview_pages = crate::gfx::render_pages(&self.textarea.lines().join("\n"));
-                // One protocol slot per page, filled lazily on first display.
-                *self.preview_page_protocols.borrow_mut() =
-                    (0..self.preview_pages.len()).map(|_| None).collect();
+                // Start an incremental render; the main loop drives it while the
+                // loading modal shows progress. `None` means no fonts → text view.
+                self.preview_job = crate::gfx::Job::new(&self.textarea.lines().join("\n"));
             }
             self.mode = Mode::Preview;
         }
@@ -640,10 +643,39 @@ impl App {
 
     fn close_preview(&mut self) {
         self.mode = Mode::Editor;
+        self.preview_job = None;
         self.preview_pages.clear();
         self.preview_page_protocols.borrow_mut().clear();
         *self.preview_zoom_protocol.borrow_mut() = None;
         self.preview_view_key.set(None);
+    }
+
+    /// True while the graphical preview is still being rasterized.
+    pub fn preview_loading(&self) -> bool {
+        self.preview_job.is_some()
+    }
+
+    /// Progress of the preview rasterization (0.0..=1.0).
+    pub fn preview_progress(&self) -> f32 {
+        self.preview_job
+            .as_ref()
+            .map(|j| j.progress())
+            .unwrap_or(1.0)
+    }
+
+    /// Do a slice of preview rasterization work; finalize pages when complete.
+    pub fn step_preview_job(&mut self) {
+        let Some(mut job) = self.preview_job.take() else {
+            return;
+        };
+        job.step(Duration::from_millis(33));
+        if job.is_done() {
+            self.preview_pages = job.finish();
+            *self.preview_page_protocols.borrow_mut() =
+                (0..self.preview_pages.len()).map(|_| None).collect();
+        } else {
+            self.preview_job = Some(job);
+        }
     }
 
     /// Ensure the protocol needed for the current view exists (building/encoding
@@ -739,6 +771,13 @@ impl App {
     /// Key handling for the preview: graphical pages (navigate/zoom/pan) or the
     /// scrolling text preview as a fallback.
     fn handle_preview_key(&mut self, key: KeyEvent) {
+        // While the graphical preview is still rendering, only allow cancelling.
+        if self.preview_loading() {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(5) | KeyCode::Char('q')) {
+                self.close_preview();
+            }
+            return;
+        }
         // Text preview (no graphical pages): reuse the scrolling overlay handler.
         if self.preview_pages.is_empty() {
             self.handle_overlay_key(key, OverlayKind::Preview);

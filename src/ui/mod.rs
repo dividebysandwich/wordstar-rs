@@ -139,6 +139,45 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// A centered modal showing graphical-preview rasterization progress.
+fn loading_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let progress = app.preview_progress().clamp(0.0, 1.0);
+    let pct = (progress * 100.0).round() as u32;
+
+    let bar_w: usize = 30;
+    let filled = (progress * bar_w as f32).round() as usize;
+    let bar = format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(bar_w.saturating_sub(filled))
+    );
+
+    let rect = centered(area, (bar_w as u16) + 10, 6);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Preview ")
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let body = vec![
+        Line::from(Span::raw("Generating graphical preview…")),
+        Line::default(),
+        Line::from(Span::raw(format!("{bar} {pct}%"))),
+        Line::from(Span::styled(
+            "Esc to cancel",
+            Style::default().fg(ratatui::style::Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(body)
+            .alignment(Alignment::Center)
+            .style(theme::status_bar()),
+        inner,
+    );
+}
+
 /// Build a row of ASCII buttons like `[ Yes ]  [ No ]`, each `(hotkey, rest)`
 /// with the hotkey letter emphasized.
 fn ascii_buttons(buttons: &[(&str, &str)]) -> Vec<Span<'static>> {
@@ -158,6 +197,10 @@ fn ascii_buttons(buttons: &[(&str, &str)]) -> Vec<Span<'static>> {
 }
 
 fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    if app.preview_loading() {
+        loading_overlay(frame, area, app);
+        return;
+    }
     frame.render_widget(Clear, area);
 
     let graphical = !app.preview_pages.is_empty();
@@ -742,6 +785,26 @@ mod tests {
         assert!(screen.contains("[ Yes ]"), "Yes button missing:\n{screen}");
         assert!(screen.contains("[ No ]"), "No button missing");
         assert!(screen.contains("[ Cancel ]"), "Cancel button missing");
+    }
+
+    #[test]
+    fn loading_modal_shows_progress() {
+        let mut app = App::new(None).unwrap();
+        let Some(job) = crate::gfx::Job::new(&"para\n\n".repeat(60)) else {
+            return; // no system fonts in this environment
+        };
+        app.preview_job = Some(job);
+        app.mode = Mode::Preview;
+        let screen = render_app(&app, 80, 20);
+        assert!(
+            screen.contains("Generating graphical preview"),
+            "loading title missing:\n{screen}"
+        );
+        assert!(screen.contains('%'), "percent missing");
+        assert!(
+            screen.contains('[') && screen.contains(']'),
+            "progress bar missing"
+        );
     }
 }
 

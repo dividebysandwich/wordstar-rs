@@ -75,12 +75,26 @@ fn graphics_terminal_likely() -> bool {
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::draw(frame, &app))?;
-        match event::read()? {
-            Event::Key(key) => app.handle_key(key),
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
-            Event::Paste(text) => app.handle_paste(text),
-            _ => {}
+
+        if app.preview_loading() {
+            // Render the next slice of the graphical preview, redraw the progress
+            // modal, and stay responsive to a cancel key without blocking.
+            app.step_preview_job();
+            if event::poll(std::time::Duration::ZERO)? {
+                dispatch(&mut app, event::read()?);
+            }
+        } else {
+            dispatch(&mut app, event::read()?);
         }
     }
     Ok(())
+}
+
+fn dispatch(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) => app.handle_key(key),
+        Event::Mouse(mouse) => app.handle_mouse(mouse),
+        Event::Paste(text) => app.handle_paste(text),
+        _ => {}
+    }
 }

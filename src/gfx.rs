@@ -9,6 +9,7 @@
 //! falls back to the text preview.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
@@ -40,25 +41,73 @@ thread_local! {
     static CACHE: RefCell<SwashCache> = RefCell::new(SwashCache::new());
 }
 
-/// Render `markdown` into a list of page images, or an empty list if no fonts
-/// could be loaded (→ caller uses the text preview).
-pub fn render_pages(markdown: &str) -> Vec<RgbaImage> {
-    let blocks = parse(strip_frontmatter(markdown));
-    FONTS.with(|fonts| {
-        let mut fonts = fonts.borrow_mut();
-        if fonts.is_none() {
-            *fonts = Some(FontSystem::new());
+/// An incremental rasterization job: renders one block per `step` call (within a
+/// time budget) so the UI can show a progress modal for long documents.
+pub struct Job {
+    blocks: Vec<Block>,
+    next: usize,
+    strips: Vec<RgbaImage>,
+}
+
+impl Job {
+    /// Start a job, or `None` if no system fonts are available (→ text preview).
+    pub fn new(markdown: &str) -> Option<Job> {
+        let blocks = parse(strip_frontmatter(markdown));
+        let have_fonts = FONTS.with(|fonts| {
+            let mut fonts = fonts.borrow_mut();
+            if fonts.is_none() {
+                *fonts = Some(FontSystem::new());
+            }
+            !fonts.as_ref().unwrap().db().is_empty()
+        });
+        if !have_fonts {
+            return None;
         }
-        let fs = fonts.as_mut().unwrap();
-        if fs.db().is_empty() {
-            return Vec::new();
-        }
-        CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            let strips = build_strips(fs, &mut cache, &blocks);
-            paginate(&strips)
+        let cap = blocks.len();
+        Some(Job {
+            blocks,
+            next: 0,
+            strips: Vec::with_capacity(cap),
         })
-    })
+    }
+
+    /// Fraction complete, 0.0..=1.0.
+    pub fn progress(&self) -> f32 {
+        if self.blocks.is_empty() {
+            1.0
+        } else {
+            self.next as f32 / self.blocks.len() as f32
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.next >= self.blocks.len()
+    }
+
+    /// Rasterize blocks until `budget` elapses (at least one per call).
+    pub fn step(&mut self, budget: Duration) {
+        let start = Instant::now();
+        FONTS.with(|fonts| {
+            let mut fonts = fonts.borrow_mut();
+            let fs = fonts.as_mut().unwrap();
+            CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                while self.next < self.blocks.len() {
+                    let strip = build_strip(fs, &mut cache, &self.blocks[self.next]);
+                    self.strips.push(strip);
+                    self.next += 1;
+                    if start.elapsed() >= budget {
+                        break;
+                    }
+                }
+            });
+        });
+    }
+
+    /// Consume the finished job and paginate the strips into pages.
+    pub fn finish(self) -> Vec<RgbaImage> {
+        paginate(&self.strips)
+    }
 }
 
 fn heading_px(level: u8) -> f32 {
@@ -71,77 +120,72 @@ fn heading_px(level: u8) -> f32 {
     }
 }
 
-/// Render each block to a full-content-width strip image.
-fn build_strips(fs: &mut FontSystem, cache: &mut SwashCache, blocks: &[Block]) -> Vec<RgbaImage> {
-    let mut strips = Vec::new();
-    for block in blocks {
-        let strip = match block {
-            Block::Heading(level, segs) => {
-                let bold: Vec<Seg> = segs
-                    .iter()
-                    .map(|s| Seg {
-                        text: s.text.clone(),
-                        bold: true,
-                        italic: s.italic,
-                    })
-                    .collect();
-                text_strip(
-                    fs,
-                    cache,
-                    &bold,
-                    heading_px(*level),
-                    Family::SansSerif,
-                    0.0,
-                    HEADING,
-                )
-            }
-            Block::Para(segs) => text_strip(fs, cache, segs, BODY, Family::SansSerif, 0.0, TEXT),
-            Block::Item {
-                depth,
-                marker,
-                segs,
-            } => {
-                let indent = (*depth as f32) * 28.0;
-                let mut all = vec![Seg {
-                    text: marker.clone(),
-                    bold: false,
-                    italic: false,
-                }];
-                all.extend(segs.iter().cloned());
-                text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT)
-            }
-            Block::Code(lines) => {
-                let seg = Seg {
-                    text: lines.join("\n"),
-                    bold: false,
-                    italic: false,
-                };
-                text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE)
-            }
-            Block::Quote(segs) => {
-                let italic: Vec<Seg> = segs
-                    .iter()
-                    .map(|s| Seg {
-                        text: s.text.clone(),
-                        bold: s.bold,
-                        italic: true,
-                    })
-                    .collect();
-                text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE)
-            }
-            Block::Rule => rule_strip(),
-            Block::Table { header, rows } => {
-                let seg = Seg {
-                    text: ascii_table(header, rows),
-                    bold: false,
-                    italic: false,
-                };
-                text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT)
-            }
-        };
-        strips.push(strip);
+/// Render a single block to a full-content-width strip image.
+fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> RgbaImage {
+    match block {
+        Block::Heading(level, segs) => {
+            let bold: Vec<Seg> = segs
+                .iter()
+                .map(|s| Seg {
+                    text: s.text.clone(),
+                    bold: true,
+                    italic: s.italic,
+                })
+                .collect();
+            text_strip(
+                fs,
+                cache,
+                &bold,
+                heading_px(*level),
+                Family::SansSerif,
+                0.0,
+                HEADING,
+            )
+        }
+        Block::Para(segs) => text_strip(fs, cache, segs, BODY, Family::SansSerif, 0.0, TEXT),
+        Block::Item {
+            depth,
+            marker,
+            segs,
+        } => {
+            let indent = (*depth as f32) * 28.0;
+            let mut all = vec![Seg {
+                text: marker.clone(),
+                bold: false,
+                italic: false,
+            }];
+            all.extend(segs.iter().cloned());
+            text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT)
+        }
+        Block::Code(lines) => {
+            let seg = Seg {
+                text: lines.join("\n"),
+                bold: false,
+                italic: false,
+            };
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE)
+        }
+        Block::Quote(segs) => {
+            let italic: Vec<Seg> = segs
+                .iter()
+                .map(|s| Seg {
+                    text: s.text.clone(),
+                    bold: s.bold,
+                    italic: true,
+                })
+                .collect();
+            text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE)
+        }
+        Block::Rule => rule_strip(),
+        Block::Table { header, rows } => {
+            let seg = Seg {
+                text: ascii_table(header, rows),
+                bold: false,
+                italic: false,
+            };
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT)
+        }
     }
-    strips
 }
 
 /// Render `segs` into a strip of width `CONTENT_W`, the text indented by `indent`.
@@ -359,10 +403,13 @@ mod tests {
         let md = (0..120)
             .map(|i| format!("Paragraph number {i}.\n\n"))
             .collect::<String>();
-        let pages = render_pages(&md);
-        if pages.is_empty() {
-            return; // no system fonts in this environment
-        }
+        let pages = match Job::new(&md) {
+            Some(mut job) => {
+                job.step(Duration::from_secs(60));
+                job.finish()
+            }
+            None => return, // no system fonts in this environment
+        };
         assert!(
             pages.len() >= 2,
             "expected multiple pages, got {}",
