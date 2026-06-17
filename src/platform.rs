@@ -24,6 +24,41 @@ pub fn now_ms() -> f64 {
         .unwrap_or(0.0)
 }
 
+// localStorage keys for the autosaved working document, so an accidental reload
+// or navigation doesn't lose unsaved edits.
+#[cfg(target_arch = "wasm32")]
+const DRAFT_TEXT: &str = "wordstar-rs:draft:text";
+#[cfg(target_arch = "wasm32")]
+const DRAFT_PATH: &str = "wordstar-rs:draft:path";
+#[cfg(target_arch = "wasm32")]
+const DRAFT_MODIFIED: &str = "wordstar-rs:draft:modified";
+
+#[cfg(target_arch = "wasm32")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// Persist the working document (text, file name, modified flag) to the browser's
+/// localStorage so it can be recovered on the next load.
+#[cfg(target_arch = "wasm32")]
+pub fn save_draft(text: &str, path: &str, modified: bool) {
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(DRAFT_TEXT, text);
+        let _ = storage.set_item(DRAFT_PATH, path);
+        let _ = storage.set_item(DRAFT_MODIFIED, if modified { "1" } else { "0" });
+    }
+}
+
+/// Load a previously autosaved draft, if any: `(text, file name, modified)`.
+#[cfg(target_arch = "wasm32")]
+pub fn load_draft() -> Option<(String, String, bool)> {
+    let storage = local_storage()?;
+    let text = storage.get_item(DRAFT_TEXT).ok().flatten()?;
+    let path = storage.get_item(DRAFT_PATH).ok().flatten().unwrap_or_default();
+    let modified = storage.get_item(DRAFT_MODIFIED).ok().flatten().as_deref() == Some("1");
+    Some((text, path, modified))
+}
+
 /// Trigger a browser download of `bytes` as `filename` with the given MIME type.
 #[cfg(target_arch = "wasm32")]
 pub fn download(filename: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {

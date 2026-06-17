@@ -66,6 +66,7 @@ features = [
     "MouseEvent",
     "FontFaceSet",
     "HtmlElement",
+    "Storage",
     "console",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",

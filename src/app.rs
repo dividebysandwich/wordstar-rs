@@ -815,6 +815,31 @@ impl App {
         }
     }
 
+    /// The current document as Markdown (for the browser autosave).
+    #[cfg(target_arch = "wasm32")]
+    pub fn document_text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    /// The current file name (empty if untitled), for the browser autosave.
+    #[cfg(target_arch = "wasm32")]
+    pub fn draft_path(&self) -> String {
+        self.path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Restore an autosaved draft into the editor on browser startup.
+    #[cfg(target_arch = "wasm32")]
+    pub fn restore_draft(&mut self, text: &str, path: &str, modified: bool) {
+        self.textarea = TextArea::new(text_to_lines(text));
+        self.apply_editor_theme();
+        self.path = (!path.is_empty()).then(|| PathBuf::from(path));
+        self.modified = modified;
+        self.set_status("Recovered your unsaved document from this browser.");
+    }
+
     // ------------------------------------------------------------------
     // Preview / Help overlays
     // ------------------------------------------------------------------

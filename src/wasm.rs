@@ -77,6 +77,13 @@ fn run() -> Result<(), wasm_bindgen::JsValue> {
         App::new(None).map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?,
     ));
 
+    // Recover the document autosaved before the last reload / navigation.
+    if let Some((text, path, modified)) = crate::platform::load_draft()
+        && !text.is_empty()
+    {
+        app.borrow_mut().restore_draft(&text, &path, modified);
+    }
+
     let window = web_sys::window().ok_or_else(|| wasm_bindgen::JsValue::from_str("no window"))?;
 
     let backend = DomBackend::new().map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
@@ -88,8 +95,12 @@ fn run() -> Result<(), wasm_bindgen::JsValue> {
     // bind our own listeners to `window` instead; those survive grid rebuilds.
     install_input_handlers(&window, &app)?;
 
-    // Render loop: advance async work, draw the TUI, then paint the preview
-    // canvas on top (or hide it).
+    // Final autosave when the page is being closed/reloaded, so even edits made
+    // since the last periodic save are recovered.
+    install_unload_autosave(&window, &app)?;
+
+    // Render loop: advance async work, draw the TUI, periodically autosave, then
+    // paint the preview canvas on top (or hide it).
     terminal.draw_web(move |frame| {
         let mut app = app.borrow_mut();
         if app.preview_loading() {
@@ -98,8 +109,59 @@ fn run() -> Result<(), wasm_bindgen::JsValue> {
         app.poll_pending_open();
         ui::draw(frame, &app);
         canvas::render(&app);
+        maybe_autosave(&app);
     });
 
+    Ok(())
+}
+
+/// Persist the document to localStorage at most every `AUTOSAVE_INTERVAL_MS`, and
+/// only when it has actually changed since the last save.
+fn maybe_autosave(app: &App) {
+    use std::cell::Cell;
+    use std::hash::{Hash, Hasher};
+
+    const AUTOSAVE_INTERVAL_MS: f64 = 1500.0;
+    thread_local! {
+        static LAST_MS: Cell<f64> = const { Cell::new(f64::NEG_INFINITY) };
+        static LAST_HASH: Cell<u64> = const { Cell::new(0) };
+    }
+
+    let now = crate::platform::now_ms();
+    if now - LAST_MS.with(Cell::get) < AUTOSAVE_INTERVAL_MS {
+        return;
+    }
+    LAST_MS.with(|c| c.set(now));
+
+    let text = app.document_text();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    app.modified.hash(&mut hasher);
+    let hash = hasher.finish();
+    if LAST_HASH.with(Cell::get) == hash {
+        return;
+    }
+    LAST_HASH.with(|c| c.set(hash));
+    crate::platform::save_draft(&text, &app.draft_path(), app.modified);
+}
+
+/// Register a `beforeunload` listener that saves the current document, catching
+/// edits made since the last periodic autosave.
+fn install_unload_autosave(
+    window: &web_sys::Window,
+    app: &Rc<RefCell<App>>,
+) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let app = app.clone();
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        if let Ok(app) = app.try_borrow() {
+            crate::platform::save_draft(&app.document_text(), &app.draft_path(), app.modified);
+        }
+    });
+    window.add_event_listener_with_callback("beforeunload", cb.as_ref().unchecked_ref())?;
+    cb.forget();
     Ok(())
 }
 
