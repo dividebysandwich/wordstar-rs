@@ -17,39 +17,76 @@ use crate::app::App;
 use crate::ui;
 
 /// wasm entry point, invoked automatically when the module loads.
+///
+/// Ratzilla measures the terminal cell size once, when the `DomBackend` is
+/// constructed, from the currently-active font — sized as `width: 1ch`, i.e. the
+/// font's "0"-glyph advance. Web fonts load asynchronously, so if we initialized
+/// immediately the grid would be sized for the fallback font and then end up with
+/// too many columns once BigBlue Terminal (wider cell) swapped in, overflowing
+/// the right edge. We therefore (1) wait for the screen font to load, then (2)
+/// yield one animation frame so the browser actually applies it in a layout pass,
+/// and only then build the backend so the single measurement uses the real font.
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub fn start() -> Result<(), wasm_bindgen::JsValue> {
+pub fn start() {
     console_error_panic_hook::set_once();
+    wasm_bindgen_futures::spawn_local(async {
+        wait_for_screen_font().await;
+        next_animation_frame().await;
+        if let Err(err) = run() {
+            web_sys::console::error_1(&err);
+        }
+    });
+}
 
+/// Resolve once the BigBlue Terminal screen font is loaded (or immediately if it
+/// cannot be loaded), so the subsequent cell-size measurement is accurate.
+async fn wait_for_screen_font() {
+    if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+        let promise = document.fonts().load("16px \"BigBlue Terminal\"");
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+/// Await a single `requestAnimationFrame` tick, letting the browser run a layout
+/// pass (so a just-loaded font is applied before anything measures the DOM).
+async fn next_animation_frame() {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let cb = Closure::once_into_js(move || {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        });
+        let _ = window.request_animation_frame(cb.unchecked_ref());
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// Terminal cell size in CSS pixels. Must match the metrics pinned in
+/// `index.html` (font-size 15px → 10px wide; line-height 20px tall). Ratzilla
+/// also assumes this 10x20 cell internally, so keeping it in sync here lets us
+/// map mouse pixel coordinates to grid cells directly.
+const CELL_W_PX: f64 = 10.0;
+const CELL_H_PX: f64 = 20.0;
+
+/// Build the backend, wire up events and start the render loop.
+fn run() -> Result<(), wasm_bindgen::JsValue> {
     let app = Rc::new(RefCell::new(
         App::new(None).map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?,
     ));
 
+    let window = web_sys::window().ok_or_else(|| wasm_bindgen::JsValue::from_str("no window"))?;
+
     let backend = DomBackend::new().map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
-    let mut terminal =
+    let terminal =
         Terminal::new(backend).map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
 
-    // Keyboard: translate Ratzilla's web key event into the editor's vocabulary.
-    terminal
-        .on_key_event({
-            let app = app.clone();
-            move |ev| {
-                app.borrow_mut().handle_key(ev.into());
-            }
-        })
-        .map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
-
-    // Mouse: clicks/drags map to selection; scroll/enter/exit are ignored.
-    terminal
-        .on_mouse_event({
-            let app = app.clone();
-            move |ev| {
-                if let Some(me) = crate::input::mouse_event_from(ev) {
-                    app.borrow_mut().handle_mouse(me);
-                }
-            }
-        })
-        .map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
+    // Ratzilla attaches its key/mouse listeners to the grid element, which it
+    // destroys and rebuilds on every window resize — leaving input dead. So we
+    // bind our own listeners to `window` instead; those survive grid rebuilds.
+    install_input_handlers(&window, &app)?;
 
     // Render loop: advance async work, draw the TUI, then paint the preview
     // canvas on top (or hide it).
@@ -63,6 +100,89 @@ pub fn start() -> Result<(), wasm_bindgen::JsValue> {
         canvas::render(&app);
     });
 
+    Ok(())
+}
+
+/// Bind keyboard and mouse listeners to `window` (not the grid), translating web
+/// events into the editor's input vocabulary.
+fn install_input_handlers(
+    window: &web_sys::Window,
+    app: &Rc<RefCell<App>>,
+) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    // Keyboard. Reuse Ratzilla's `web_sys::KeyboardEvent` → key conversion. The
+    // editor is a full-screen app that drives everything from the keyboard
+    // (WordStar chords, F-keys), so suppress the browser's own handling — e.g.
+    // F5 (reload), Ctrl-O/P/S (open/print/save dialogs) — which would otherwise
+    // hijack keys the editor needs.
+    let key_app = app.clone();
+    let key_cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+        ev.prevent_default();
+        let key: crate::input::KeyEvent = ratzilla::event::KeyEvent::from(ev).into();
+        key_app.borrow_mut().handle_key(key);
+    });
+    window.add_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref())?;
+    key_cb.forget();
+
+    // Mouse. The pinned 10x20 cell makes pixel → grid mapping a plain division.
+    use crate::input::{MouseButton, MouseEventKind};
+    install_mouse(window, app, "mousedown", |ev| {
+        (ev.button() == 0).then_some(MouseEventKind::Down(MouseButton::Left))
+    })?;
+    install_mouse(window, app, "mouseup", |ev| {
+        (ev.button() == 0).then_some(MouseEventKind::Up(MouseButton::Left))
+    })?;
+    install_mouse(window, app, "mousemove", |ev| {
+        Some(if ev.buttons() & 1 != 0 {
+            MouseEventKind::Drag(MouseButton::Left)
+        } else {
+            MouseEventKind::Moved
+        })
+    })?;
+    Ok(())
+}
+
+/// Register one `window` mouse listener for `event_type`, turning the web event
+/// into a [`crate::input::MouseEvent`] via `make_kind` (which decides the kind or
+/// returns `None` to ignore the event).
+fn install_mouse(
+    window: &web_sys::Window,
+    app: &Rc<RefCell<App>>,
+    event_type: &str,
+    make_kind: fn(&web_sys::MouseEvent) -> Option<crate::input::MouseEventKind>,
+) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+    use crate::input::{KeyModifiers, MouseEvent};
+
+    let app = app.clone();
+    let cb = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
+        let Some(kind) = make_kind(&ev) else {
+            return;
+        };
+        let column = (ev.client_x().max(0) as f64 / CELL_W_PX) as u16;
+        let row = (ev.client_y().max(0) as f64 / CELL_H_PX) as u16;
+        let mut modifiers = KeyModifiers::NONE;
+        if ev.ctrl_key() {
+            modifiers |= KeyModifiers::CONTROL;
+        }
+        if ev.alt_key() {
+            modifiers |= KeyModifiers::ALT;
+        }
+        if ev.shift_key() {
+            modifiers |= KeyModifiers::SHIFT;
+        }
+        app.borrow_mut().handle_mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers,
+        });
+    });
+    window.add_event_listener_with_callback(event_type, cb.as_ref().unchecked_ref())?;
+    cb.forget();
     Ok(())
 }
 

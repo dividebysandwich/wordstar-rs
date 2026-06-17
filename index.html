@@ -15,7 +15,18 @@
       data-wasm-opt="z"
       data-wasm-opt-params="-all"
     />
+    <!-- BigBlue Terminal (VileR, CC BY-SA 4.0): the retro IBM-PC terminal face
+         for the editor's DOM grid. Subset to the glyphs WordStar uses. This is
+         the screen font only; the graphical preview keeps the embedded DejaVu
+         fonts. Served as a sibling file so the relative url() resolves under the
+         GitHub Pages subpath too. -->
+    <link data-trunk rel="copy-file" href="assets/fonts/BigBlueTerminal.ttf" />
     <style>
+      @font-face {
+        font-family: "BigBlue Terminal";
+        src: url("./BigBlueTerminal.ttf") format("truetype");
+        font-display: block;
+      }
       html,
       body {
         margin: 0;
@@ -23,16 +34,37 @@
         background: #0000aa;
         overflow: hidden;
       }
-      /* Ratzilla's DomBackend renders each terminal row as a <pre>. Browsers
-         give <pre> a default `margin: 1em 0`, which inserts a blank gap between
-         every row (and makes the actual row height exceed the measured cell
-         height). Zero it so rows are flush, matching the cell-size probe. */
+      /* The editor grid uses BigBlue Terminal. Ratzilla renders each row — and
+         its cell-size probe — as a <pre>, and <pre> has a UA-default
+         `font-family: monospace` that would otherwise override inheritance, so
+         the family must be set on the element itself (probe included).
+
+         Crucially, Ratzilla's `Backend::size()` derives the ratatui buffer
+         dimensions from a HARD-CODED 10x20px cell (viewport / 10 wide, / 20
+         tall), but it builds and indexes the actual DOM grid from the *measured*
+         cell. If the real cell differs, the buffer and grid disagree: a wider
+         cell means more buffer columns than grid columns, so the right edge
+         wraps to the next row (and eventually panics out of bounds).
+
+         So pin the metrics to make the measured cell exactly 10x20px. BigBlue's
+         advance is 2/3 em, hence 15px font -> 10px wide; line-height forces the
+         20px height (overriding the inline `line-height: normal` Ratzilla puts
+         on its probe, so the probe measures 20px too). */
+      pre {
+        font-family: "BigBlue Terminal", monospace;
+        font-size: 15px;
+        line-height: 20px !important;
+      }
+      /* Ratzilla gives each row <pre> a default `margin: 1em 0`; zero it so rows
+         are flush. `white-space: pre` + `overflow: hidden` keep a row's cells on
+         one line (clip rather than wrap) if anything ever overflows. */
       #grid,
       #grid pre {
         margin: 0;
         padding: 0;
         border: 0;
-        line-height: normal;
+        white-space: pre;
+        overflow: hidden;
       }
     </style>
   </head>

@@ -205,34 +205,7 @@ mod wasm_events {
         }
     }
 
-    impl From<ratzilla::event::MouseButton> for MouseButton {
-        fn from(b: ratzilla::event::MouseButton) -> MouseButton {
-            use ratzilla::event::MouseButton as R;
-            match b {
-                R::Right => MouseButton::Right,
-                R::Middle => MouseButton::Middle,
-                _ => MouseButton::Left,
-            }
-        }
-    }
-
-    /// Convert a Ratzilla mouse event. Returns `None` for kinds the editor does
-    /// not act on (enter/exit/unidentified), so callers can simply skip them.
-    pub fn mouse_event_from(ev: ratzilla::event::MouseEvent) -> Option<MouseEvent> {
-        use ratzilla::event::MouseEventKind as R;
-        let kind = match ev.kind {
-            R::ButtonDown(b) => MouseEventKind::Down(b.into()),
-            R::ButtonUp(b) => MouseEventKind::Up(b.into()),
-            R::Moved => MouseEventKind::Moved,
-            // Ratzilla reports synthesized clicks too; the editor already derives
-            // clicks from button-down, so ignore those to avoid double handling.
-            _ => return None,
-        };
-        Some(MouseEvent {
-            kind,
-            column: ev.col,
-            row: ev.row,
-            modifiers: modifiers_from(ev.ctrl, ev.alt, ev.shift),
-        })
-    }
+    // Mouse events are built directly from `web_sys::MouseEvent` in the wasm
+    // entry point (it maps pixel coordinates to grid cells), so no Ratzilla mouse
+    // conversion is needed here.
 }
