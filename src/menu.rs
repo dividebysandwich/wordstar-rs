@@ -187,6 +187,15 @@ pub static MENUS: &[Menu] = &[
 /// Index of the Help menu (rendered right-aligned in the bar).
 pub const HELP_INDEX: usize = MENUS.len() - 1;
 
+/// The menu whose accelerator (highlighted first letter, e.g. `F` in File) is
+/// `c`, for Alt-key access from the editor. Case-insensitive.
+pub fn menu_for_accelerator(c: char) -> Option<usize> {
+    let c = c.to_ascii_lowercase();
+    MENUS
+        .iter()
+        .position(|m| m.title.chars().next().map(|f| f.to_ascii_lowercase()) == Some(c))
+}
+
 /// First non-separator index in a list of items.
 fn first_selectable(items: &[MenuItem]) -> usize {
     items

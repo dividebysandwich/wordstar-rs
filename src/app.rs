@@ -15,7 +15,7 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 use crate::input::{
-    KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::{Alignment, Rect};
 use ratatui_textarea::{CursorMove, Input, Key, TextArea};
@@ -394,6 +394,16 @@ impl App {
     fn handle_editor_key(&mut self, key: KeyEvent) {
         // Any key other than a repeated quit clears the quit warning and status.
         self.status_msg = None;
+
+        // Alt+<accelerator> opens the matching menu (Alt+F = File, Alt+E = Edit…).
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && let KeyCode::Char(c) = key.code
+            && let Some(idx) = crate::menu::menu_for_accelerator(c)
+        {
+            self.open_menu();
+            self.menu.select_menu(idx);
+            return;
+        }
 
         match keymap::resolve(&mut self.chord, key) {
             Resolution::Command(cmd) => commands::execute(self, cmd),
@@ -2311,6 +2321,29 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.textarea.lines(), ["Body"]);
+    }
+
+    #[test]
+    fn alt_accelerator_opens_matching_menu() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(None).unwrap();
+
+        // Alt+F opens the File menu (index 0).
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(app.mode, Mode::Menu);
+        assert_eq!(app.menu.menu, 0);
+
+        // Case-insensitive: Alt+U opens Utilities.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Editor);
+        app.handle_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::ALT));
+        assert_eq!(app.mode, Mode::Menu);
+        assert_eq!(app.menu.menu, crate::menu::menu_for_accelerator('u').unwrap());
+
+        // Alt with a letter that isn't an accelerator does not open a menu.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+        assert_eq!(app.mode, Mode::Editor);
     }
 
     #[test]
