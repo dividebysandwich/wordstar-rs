@@ -3222,6 +3222,7 @@ dependencies = [
  "ratatui-image",
  "ratatui-textarea",
  "ratzilla",
+ "unicode-script",
  "unicode-segmentation",
  "unicode-width",
  "wasm-bindgen",

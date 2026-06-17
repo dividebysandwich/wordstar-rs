@@ -47,6 +47,9 @@ ratzilla = "0.3"
 # ratatui-core needs a `critical-section` implementation; the std impl works on
 # single-threaded wasm and resolves the otherwise-undefined acquire/release.
 critical-section = { version = "1", features = ["std"] }
+# Same version cosmic-text uses, so our custom font fallback's `Script` type
+# matches the `cosmic_text::Fallback` trait signature.
+unicode-script = "0.5.8"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

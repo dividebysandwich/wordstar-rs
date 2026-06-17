@@ -49,10 +49,34 @@ fn new_font_system() -> FontSystem {
     FontSystem::new()
 }
 
+/// The bundled families, used as the browser's font fallback chain. cosmic-text's
+/// wasm `PlatformFallback` is empty, so without this a glyph absent from the
+/// matched face (e.g. a symbol present in DejaVu Sans but not in DejaVu Sans
+/// *Bold*, which headings use) would render as tofu instead of falling back to a
+/// face that has it. Listing all three families also covers glyphs that only one
+/// of sans/serif/mono carries.
+#[cfg(target_arch = "wasm32")]
+const FALLBACK_FAMILIES: &[&str] = &["DejaVu Sans", "DejaVu Serif", "DejaVu Sans Mono"];
+
+#[cfg(target_arch = "wasm32")]
+struct BundledFallback;
+
+#[cfg(target_arch = "wasm32")]
+impl cosmic_text::Fallback for BundledFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        FALLBACK_FAMILIES
+    }
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+    fn script_fallback(&self, _script: unicode_script::Script, _locale: &str) -> &[&'static str] {
+        FALLBACK_FAMILIES
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn new_font_system() -> FontSystem {
-    let mut fs = FontSystem::new();
-    let db = fs.db_mut();
+    let mut db = cosmic_text::fontdb::Database::new();
     for data in [
         include_bytes!("../assets/fonts/DejaVuSans.ttf").as_slice(),
         include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf").as_slice(),
@@ -67,12 +91,57 @@ fn new_font_system() -> FontSystem {
         include_bytes!("../assets/fonts/DejaVuSansMono-Oblique.ttf").as_slice(),
         include_bytes!("../assets/fonts/DejaVuSansMono-BoldOblique.ttf").as_slice(),
     ] {
+        // Record which codepoints the bundled fonts actually cover, so the
+        // preview can drop characters they don't have (chiefly emoji) rather than
+        // show tofu — the browser has no OS fallback to borrow glyphs from.
+        if let Ok(font) = cosmic_text::skrifa::FontRef::new(data) {
+            use cosmic_text::skrifa::MetadataProvider;
+            COVERAGE.with(|cov| cov.borrow_mut().extend(font.charmap().mappings().map(|(cp, _)| cp)));
+        }
         db.load_font_data(data.to_vec());
     }
     db.set_sans_serif_family("DejaVu Sans");
     db.set_serif_family("DejaVu Serif");
     db.set_monospace_family("DejaVu Sans Mono");
-    fs
+    FontSystem::new_with_locale_and_db_and_fallback("en-US".to_string(), db, BundledFallback)
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// Codepoints covered by the bundled fonts (built in `new_font_system`).
+    static COVERAGE: RefCell<std::collections::HashSet<u32>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Prepare a run's text for shaping. On native, used as-is. In the browser, drop
+/// characters the bundled fonts can't render (e.g. emoji) — and a single space
+/// trailing such a character — so they don't appear as tofu boxes.
+#[cfg(not(target_arch = "wasm32"))]
+fn prepare_text(s: &str) -> String {
+    s.to_string()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn prepare_text(s: &str) -> String {
+    COVERAGE.with(|cov| {
+        let cov = cov.borrow();
+        let mut out = String::with_capacity(s.len());
+        let mut dropped = false;
+        for c in s.chars() {
+            // ASCII is always kept (covers whitespace/newlines used for layout).
+            if (c as u32) < 0x80 || cov.contains(&(c as u32)) {
+                if dropped && c == ' ' {
+                    dropped = false; // swallow the space left by a dropped emoji
+                    continue;
+                }
+                out.push(c);
+                dropped = false;
+            } else {
+                dropped = true;
+            }
+        }
+        out
+    })
 }
 
 /// An incremental rasterization job: renders one block per `step` call (within a
@@ -330,7 +399,7 @@ fn text_buffer(
     let default = Attrs::new().family(family);
     let spans: Vec<(String, Attrs)> = segs
         .iter()
-        .map(|s| (s.text.clone(), seg_attrs(s, family)))
+        .map(|s| (prepare_text(&s.text), seg_attrs(s, family)))
         .collect();
     buffer.set_rich_text(
         spans.iter().map(|(t, a)| (t.as_str(), a.clone())),
