@@ -60,6 +60,8 @@ pub enum Mode {
     Info,
     /// The header / footer dialog.
     Header,
+    /// The calculator dialog.
+    Calculator,
 }
 
 /// Which kind of single-line prompt is active.
@@ -107,6 +109,14 @@ pub struct HeaderState {
 pub struct InfoState {
     pub title: String,
     pub lines: Vec<String>,
+}
+
+/// State backing the [`Mode::Calculator`] dialog: the expression being typed and
+/// the formatted result of the last calculation.
+#[derive(Debug, Clone, Default)]
+pub struct CalcState {
+    pub input: String,
+    pub result: String,
 }
 
 /// A pending action awaiting yes/no confirmation in [`Mode::Confirm`].
@@ -174,6 +184,8 @@ pub struct App {
     pub confirm: Option<ConfirmState>,
     /// Active information modal (present when `mode == Info`).
     pub info: Option<InfoState>,
+    /// Active calculator dialog (present when `mode == Calculator`).
+    pub calc: Option<CalcState>,
     /// Active header/footer dialog (present when `mode == Header`).
     pub header_dialog: Option<HeaderState>,
     /// Active file browser (present when `mode == Browser`). Native only — the
@@ -275,6 +287,7 @@ impl App {
             prompt: PromptState::default(),
             confirm: None,
             info: None,
+            calc: None,
             header_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
             browser: None,
@@ -374,6 +387,7 @@ impl App {
             Mode::Help => self.handle_overlay_key(key, OverlayKind::Help),
             Mode::Info => self.handle_info_key(key),
             Mode::Header => self.handle_header_key(key),
+            Mode::Calculator => self.handle_calc_key(key),
         }
     }
 
@@ -1406,6 +1420,49 @@ impl App {
         });
     }
 
+    /// Open the calculator dialog (Utilities ▸ Calculator, `^QM`).
+    pub fn start_calculator(&mut self) {
+        self.mode = Mode::Calculator;
+        self.calc = Some(CalcState {
+            input: String::new(),
+            result: "0".into(),
+        });
+    }
+
+    fn handle_calc_key(&mut self, key: KeyEvent) {
+        let Some(calc) = self.calc.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.calc = None;
+                self.mode = Mode::Editor;
+                self.set_status("Calculator closed.");
+            }
+            // Enter / OK: evaluate the expression into "Result of Last Calculation".
+            KeyCode::Enter => {
+                let expr = calc.input.trim();
+                if expr.is_empty() {
+                    return;
+                }
+                match crate::calc::eval(expr) {
+                    Ok(value) => {
+                        calc.result = crate::calc::format_result(value);
+                        calc.input.clear();
+                    }
+                    // Keep the expression on error so it can be corrected.
+                    Err(e) => calc.result = format!("Error: {e}"),
+                }
+            }
+            KeyCode::Backspace => {
+                calc.input.pop();
+            }
+            KeyCode::Char(c) => calc.input.push(c),
+            _ => {}
+        }
+    }
+
     fn handle_header_key(&mut self, key: KeyEvent) {
         let Some(h) = self.header_dialog.as_mut() else {
             self.mode = Mode::Editor;
@@ -1704,7 +1761,7 @@ impl App {
                     self.mode = Mode::Editor;
                 }
             }
-            Mode::Prompt | Mode::Confirm | Mode::Header => {} // keyboard-only
+            Mode::Prompt | Mode::Confirm | Mode::Header | Mode::Calculator => {} // keyboard-only
         }
     }
 

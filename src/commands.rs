@@ -122,6 +122,8 @@ pub enum Command {
     Footer,
     /// Show document statistics (^K?).
     WordCount,
+    /// Open the calculator dialog (^QM).
+    Calculator,
     /// Jump to a page (prompt for a page number).
     GoToPage,
 
@@ -226,6 +228,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         Header => app.start_header(crate::app::HeaderKind::Header),
         Footer => app.start_header(crate::app::HeaderKind::Footer),
         WordCount => app.show_word_count(),
+        Calculator => app.start_calculator(),
         GoToPage => app.start_goto_page(),
 
         NotImplemented(feature) => app.not_implemented(feature),

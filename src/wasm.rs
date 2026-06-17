@@ -181,9 +181,15 @@ fn install_input_handlers(
     // hijack keys the editor needs.
     let key_app = app.clone();
     let key_cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+        let event = ratzilla::event::KeyEvent::from(ev.clone());
+        // Bare modifier presses (Shift/Ctrl/Alt) and other keys Ratzilla can't
+        // classify arrive as `Unidentified`; ignore them so they neither inject a
+        // character nor swallow the browser's own handling of that key.
+        if event.code == ratzilla::event::KeyCode::Unidentified {
+            return;
+        }
         ev.prevent_default();
-        let key: crate::input::KeyEvent = ratzilla::event::KeyEvent::from(ev).into();
-        key_app.borrow_mut().handle_key(key);
+        key_app.borrow_mut().handle_key(event.into());
     });
     window.add_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref())?;
     key_cb.forget();

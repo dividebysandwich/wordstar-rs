@@ -105,6 +105,8 @@ mod wasm_events {
         Esc,
         Char(char),
         F(u8),
+        /// An unclassified key (e.g. a bare modifier). Ignored by the app.
+        Null,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,8 +191,9 @@ mod wasm_events {
                 R::PageUp => KeyCode::PageUp,
                 R::PageDown => KeyCode::PageDown,
                 R::Esc => KeyCode::Esc,
-                // Anything the editor has no mapping for becomes an inert key.
-                R::Unidentified => KeyCode::Char('\0'),
+                // Bare modifiers / unclassified keys map to an inert key — never a
+                // NUL char, which would otherwise be inserted into the document.
+                R::Unidentified => KeyCode::Null,
             }
         }
     }

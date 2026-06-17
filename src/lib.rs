@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod attributes;
+pub mod calc;
 pub mod commands;
 pub mod gfx;
 pub mod help;

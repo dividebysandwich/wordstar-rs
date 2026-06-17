@@ -17,6 +17,11 @@ released under the **Creative Commons Attribution-ShareAlike 4.0** license
 - Two characters the editor draws but the font lacks (`▶` U+25B6, `▮` U+25AE)
   are aliased in the cmap to the near-identical CP437 glyphs the font does have
   (`►` U+25BA and `█` U+2588) so the screen never falls back mid-grid.
+- The box-drawing (U+2500–257F) and block-element (U+2580–259F) glyphs are
+  scaled vertically (about the em centre, `y' = 1.38·y − 152` at 1200 upm) so
+  they fill the browser terminal's 10×20px cell. The font's natural cell is ~1em
+  tall, but the web build forces a 20px line height to match Ratzilla's grid math;
+  without this scaling, stacked `│`/`█` glyphs leave gaps (fractured borders).
 
 As a derivative, `BigBlueTerminal.ttf` is likewise made available under
 CC BY-SA 4.0.

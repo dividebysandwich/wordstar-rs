@@ -180,6 +180,7 @@ fn resolve_q(key: KeyEvent) -> Resolution {
         Some('f') => Resolution::Command(Find),
         Some('a') => Resolution::Command(Replace),
         Some('y') => Resolution::Command(DeleteToLineEnd),
+        Some('m') => Resolution::Command(Calculator),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }

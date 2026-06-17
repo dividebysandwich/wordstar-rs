@@ -61,6 +61,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Help => help_overlay(frame, area, app),
         Mode::Info => info_overlay(frame, area, app),
         Mode::Header => header_overlay(frame, area, app),
+        Mode::Calculator => calc_overlay(frame, area, app),
     }
 }
 
@@ -343,6 +344,96 @@ fn header_overlay(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(
             "↑/↓ pages · Enter = OK · Esc = Cancel",
             Style::default().fg(ratatui::style::Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
+}
+
+/// The calculator dialog: expression input, last result, and the valid-symbol
+/// reference grid (mirrors WordStar 7's calculator).
+fn calc_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    use ratatui::style::Color;
+    let Some(calc) = app.calc.as_ref() else {
+        return;
+    };
+
+    let rect = centered(area, 72, 18);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Calculator ")
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let sym = Style::default().fg(Color::Cyan);
+    let dim = Style::default().fg(Color::DarkGray);
+
+    // The expression input, shown on a black field with a blinking cursor.
+    let field_w = inner.width.saturating_sub(2) as usize;
+    let mut field = format!("{}_", calc.input);
+    let chars = field.chars().count();
+    if chars > field_w {
+        field = field.chars().skip(chars - field_w).collect(); // keep the tail visible
+    }
+    let field_style = Style::default().bg(Color::Black).fg(Color::White);
+
+    // One reference cell: a coloured symbol followed by its name.
+    let cell = |s: &str, name: &str, name_w: usize| {
+        vec![
+            Span::styled(format!("{s:<3} "), sym),
+            Span::raw(format!("{name:<name_w$}")),
+        ]
+    };
+    let row = |c1: (&str, &str), c2: (&str, &str), c3: (&str, &str), c4: (&str, &str)| {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(cell(c1.0, c1.1, 11));
+        spans.extend(cell(c2.0, c2.1, 14));
+        spans.extend(cell(c3.0, c3.1, 13));
+        spans.extend(cell(c4.0, c4.1, 8));
+        Line::from(spans)
+    };
+
+    let body = vec![
+        Line::from(Span::styled(
+            "Enter Mathematical Expression to be Calculated:",
+            bold,
+        )),
+        Line::from(Span::styled(format!(" {field:<field_w$} "), field_style)),
+        Line::default(),
+        Line::from(Span::styled("Result of Last Calculation:", bold)),
+        Line::from(format!("  {}", calc.result)),
+        Line::default(),
+        Line::from(Span::styled("Valid Symbols:", bold)),
+        row(
+            ("+", "Add"),
+            ("%", "Percent"),
+            ("int", "Integer"),
+            ("sin", "Sine"),
+        ),
+        row(
+            ("-", "Subtract"),
+            ("sqr", "Square Root"),
+            ("log", "Base 10 Log"),
+            ("cos", "Cosine"),
+        ),
+        row(
+            ("*", "Multiply"),
+            ("^", "Exponentiate"),
+            ("ln", "Base e Log"),
+            ("tan", "Tangent"),
+        ),
+        row(
+            ("/", "Divide"),
+            ("", ""),
+            ("exp", "e^x"),
+            ("atn", "Arc Tan"),
+        ),
+        Line::default(),
+        Line::from(Span::styled(
+            "Enter = OK (calculate) · Esc = Cancel",
+            dim,
         )),
     ];
     frame.render_widget(Paragraph::new(body).style(theme::status_bar()), inner);
@@ -1016,6 +1107,33 @@ mod tests {
         assert!(screen.contains("Header"), "title missing:\n{screen}");
         assert!(screen.contains("For pages"), "pages row missing:\n{screen}");
         assert!(screen.contains("Both"), "radio missing:\n{screen}");
+    }
+
+    #[test]
+    fn calculator_overlay_renders_and_computes() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(None).unwrap();
+        app.start_calculator();
+        let screen = render_app(&app, 80, 24);
+        assert!(screen.contains("Calculator"), "title missing:\n{screen}");
+        assert!(screen.contains("Valid Symbols"), "symbols missing:\n{screen}");
+        assert!(screen.contains("Square Root"), "Square Root missing:\n{screen}");
+        assert!(screen.contains("Arc Tan"), "Arc Tan missing:\n{screen}");
+        assert!(
+            screen.contains("Result of Last Calculation"),
+            "result label missing:\n{screen}"
+        );
+
+        // Type "2^10" and press Enter → result becomes 1024.
+        for c in "2^10".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.calc.as_ref().unwrap().result, "1024");
+
+        // Esc closes the dialog.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, crate::app::Mode::Editor);
     }
 
     #[test]
