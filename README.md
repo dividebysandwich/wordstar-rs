@@ -380,8 +380,6 @@ In header and footer text, `#` prints the page number: `.fo Page #` gives
 "Page 1", "Page 2", and so on. Original WordStar files keep these dot commands
 when imported.
 
----
-
 ### A book in several files
 
 Keep each chapter in its own file and write a short **master document** that
