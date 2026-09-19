@@ -247,6 +247,11 @@ A selection made with the mouse (or still being marked, before `^KK`) acts like
 a clipboard selection instead: `^KC` copies it to the block buffer, `^KY` cuts
 it, and `^KV` pastes the buffer at the cursor.
 
+Whatever goes into the block buffer (`^KK`, `^KC`, `^KY`) is also put on your
+system clipboard, ready to paste into email or a submission form. In a terminal
+this uses the OSC 52 escape, which kitty, iTerm2, WezTerm, foot, Alacritty,
+Windows Terminal and tmux (with `set-clipboard on`) support.
+
 ### Find and replace
 
 | Keys  | Action                          |

@@ -65,6 +65,8 @@ features = [
     "Element",
     "EventTarget",
     "KeyboardEvent",
+    "Navigator",
+    "Clipboard",
     "ClipboardEvent",
     "DataTransfer",
     "MouseEvent",

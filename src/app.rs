@@ -1949,7 +1949,7 @@ impl App {
         };
         let text = self.text_between(start, end).unwrap_or_default();
         let n = text.chars().count();
-        self.block_buffer = text.clone();
+        self.set_block_buffer(text.clone());
         self.marked = Some(MarkedBlock {
             start,
             end,
@@ -1967,7 +1967,7 @@ impl App {
     pub fn block_copy(&mut self) {
         if let Some(text) = self.selected_text() {
             let n = text.chars().count();
-            self.block_buffer = text;
+            self.set_block_buffer(text);
             self.clear_marking();
             self.set_status(format!(
                 "Copied {n} chars — move the cursor and press ^KV to paste."
@@ -1982,7 +1982,7 @@ impl App {
         let end = self.cursor_pos();
         self.textarea.move_cursor(jump(at));
         self.modified = true;
-        self.block_buffer = block.text.clone();
+        self.set_block_buffer(block.text.clone());
         self.marked = Some(MarkedBlock {
             start: at,
             end,
@@ -1996,7 +1996,7 @@ impl App {
     pub fn block_delete(&mut self) {
         if let Some(text) = self.selected_text() {
             let n = text.chars().count();
-            self.block_buffer = text;
+            self.set_block_buffer(text);
             self.edit(|t| t.cut());
             self.clear_marking();
             self.set_status(format!("Cut {n} chars — press ^KV to paste."));
@@ -2011,7 +2011,7 @@ impl App {
             "Deleted the block ({} chars) — ^KV pastes it.",
             block.text.chars().count()
         ));
-        self.block_buffer = block.text;
+        self.set_block_buffer(block.text);
         self.marked = None;
     }
 
@@ -2635,6 +2635,13 @@ impl App {
     fn cursor_pos(&self) -> (usize, usize) {
         let c = self.textarea.cursor();
         (c.0, c.1)
+    }
+
+    /// Put `text` in the block buffer (what `^KV` pastes) and on the system
+    /// clipboard, so it can be pasted into other programs too.
+    fn set_block_buffer(&mut self, text: String) {
+        crate::platform::copy_to_clipboard(&text);
+        self.block_buffer = text;
     }
 
     /// The text of the live selection, or else of the displayed marked block.
