@@ -108,7 +108,7 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'q' => {
             *state = ChordState::Q;
             Resolution::Pending(
-                "^Q  Quick:  S/D line ends  R/C file ends  I)page  G)heading  P)revious  0-9 marker  B/K block ends  F)ind  A)replace  Y)del line end  M)calc",
+                "^Q  Quick:  S/D line ends  R/C file ends  I)page  G)heading  P)revious  0-9 marker  B/K block ends  F)ind  A)replace  L)spelling  N)spell word  Y)del line end  M)calc",
             )
         }
         'o' => {
@@ -188,6 +188,8 @@ fn resolve_q(key: KeyEvent) -> Resolution {
         Some('i') => Resolution::Command(GoToPage),
         Some('p') => Resolution::Command(PreviousPosition),
         Some('g') => Resolution::Command(GotoHeading),
+        Some('l') => Resolution::Command(SpellCheck),
+        Some('n') => Resolution::Command(SpellWord),
         Some(c @ '0'..='9') => Resolution::Command(GotoMarker(c as usize - '0' as usize)),
         Some('b') => Resolution::Command(GotoBlockBegin),
         Some('k') => Resolution::Command(GotoBlockEnd),

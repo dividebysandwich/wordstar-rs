@@ -95,6 +95,12 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "", "B backwards, G whole document, N don't ask");
     row(&mut out, "^L", "Find next / continue replacing");
 
+    head(&mut out, "Spelling");
+    row(&mut out, "^QL", "Check spelling from the cursor");
+    row(&mut out, "^QN", "Check the word at the cursor");
+    row(&mut out, "", "1-9 suggestion · I ignore · G ignore all");
+    row(&mut out, "", "A add to your dictionary · T type · Esc");
+
     head(&mut out, "Blocks");
     row(&mut out, "^KB", "Mark block start (then move cursor)");
     row(&mut out, "^KK", "Mark block end (block stays marked)");

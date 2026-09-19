@@ -105,6 +105,7 @@ static VIEW: &[MenuItem] = &[
     item("Command Tags", "^OD", Command::ToggleMarkup),
     item("Block Highlighting", "^KH", Command::BlockHide),
     item("Word Wrap", "^OW", Command::ToggleWrap),
+    item("Spelling Highlights", "", Command::ToggleSpellHighlight),
     SEP,
     item("Insert / Overtype", "^V", Command::ToggleInsert),
 ];
@@ -148,7 +149,8 @@ static LAYOUT: &[MenuItem] = &[
 static UTILITIES: &[MenuItem] = &[
     item("Word Count", "^K?", Command::WordCount),
     SEP,
-    todo("Spelling Check", "^QL", "Spelling check"),
+    item("Spelling Check", "^QL", Command::SpellCheck),
+    item("Check Word", "^QN", Command::SpellWord),
     todo("Thesaurus...", "^QJ", "Thesaurus"),
     item("Calculator", "^QM", Command::Calculator),
     todo("Sort Block", "", "Sort block"),

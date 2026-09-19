@@ -136,6 +136,62 @@ pub fn clear_recovery(doc: Option<&Path>) {
     }
 }
 
+/// The personal word list (`~/.config/wordstar-rs/words.txt` on Linux): words
+/// added to the spelling dictionary, one per line. Not used under `cargo test`.
+#[cfg(not(target_arch = "wasm32"))]
+fn personal_words_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::config_dir()?.join("wordstar-rs").join("words.txt"))
+}
+
+/// The words in the personal word list.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn personal_words() -> Vec<String> {
+    personal_words_file()
+        .and_then(|f| fs::read_to_string(f).ok())
+        .map(|text| text.lines().map(str::trim).filter(|w| !w.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Add `word` to the personal word list.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn add_personal_word(word: &str) {
+    let Some(file) = personal_words_file() else {
+        return;
+    };
+    if let Some(dir) = file.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = writeln!(f, "{word}");
+    }
+}
+
+/// localStorage key for the browser's personal word list.
+#[cfg(target_arch = "wasm32")]
+const PERSONAL_WORDS: &str = "wordstar-rs:words";
+
+/// The words in the personal word list (browser: kept in localStorage).
+#[cfg(target_arch = "wasm32")]
+pub fn personal_words() -> Vec<String> {
+    local_storage()
+        .and_then(|s| s.get_item(PERSONAL_WORDS).ok().flatten())
+        .map(|text| text.lines().filter(|w| !w.is_empty()).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Add `word` to the personal word list.
+#[cfg(target_arch = "wasm32")]
+pub fn add_personal_word(word: &str) {
+    if let Some(storage) = local_storage() {
+        let mut words = personal_words();
+        words.push(word.to_string());
+        let _ = storage.set_item(PERSONAL_WORDS, &words.join("\n"));
+    }
+}
+
 /// Monotonic time in milliseconds. Used for the double-click window and the
 /// incremental-preview time budget, replacing `std::time::Instant` (which is
 /// unavailable on `wasm32-unknown-unknown`).

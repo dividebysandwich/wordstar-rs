@@ -63,6 +63,8 @@ pub enum Mode {
     ReplaceAsk,
     /// The Go to Heading list.
     Outline,
+    /// The spelling check is asking about an unknown word.
+    Spell,
 }
 
 /// Which kind of single-line prompt is active.
@@ -89,6 +91,8 @@ pub enum PromptKind {
     /// Which place marker to set / go to (from the Edit menu).
     SetMarker,
     GotoMarker,
+    /// A replacement typed during the spelling check.
+    SpellReplace,
 }
 
 /// Header vs. footer for the [`Mode::Header`] dialog.
@@ -283,6 +287,22 @@ pub struct LastFind {
     pub options: FindOptions,
 }
 
+/// An unknown word found by the spelling check: its start, end and text.
+type Misspelling = ((usize, usize), (usize, usize), String);
+
+/// The spelling check's question about one unknown word ([`Mode::Spell`]).
+#[derive(Debug, Clone)]
+pub struct SpellSession {
+    pub word: String,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub suggestions: Vec<String>,
+    /// Corrections made so far in this check.
+    pub corrected: usize,
+    /// Checking just the word at the cursor (`^QN`): stop after it.
+    pub single: bool,
+}
+
 /// One heading in the Go to Heading list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutlineItem {
@@ -367,6 +387,12 @@ pub struct App {
     pub calc: Option<CalcState>,
     /// The Go to Heading list (present when `mode == Outline`).
     pub outline: Option<OutlineState>,
+    /// The spelling dictionary, loaded on first use (or why it couldn't be).
+    speller: std::cell::OnceCell<Result<crate::spell::Speller, String>>,
+    /// Underline misspelled words as you write (View menu).
+    pub spell_highlight: bool,
+    /// The spelling check in progress (when `mode == Spell`).
+    pub spell: Option<SpellSession>,
     /// Geometry of the Go to Heading list's rows, for mouse hit-testing.
     pub outline_area: Cell<Rect>,
     /// Active header/footer dialog (present when `mode == Header`).
@@ -503,6 +529,9 @@ impl App {
             info: None,
             calc: None,
             outline: None,
+            speller: std::cell::OnceCell::new(),
+            spell_highlight: true,
+            spell: None,
             outline_area: Cell::new(Rect::ZERO),
             header_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -567,6 +596,8 @@ impl App {
         self.prev_pos = None;
         self.marked = None;
         self.compound_undo = None;
+        // The next text may ask for another language.
+        self.speller = std::cell::OnceCell::new();
         self.session_start_words = crate::attributes::count_words(self.textarea.lines()).words;
         self.textarea.set_max_histories(UNDO_LEVELS);
         self.textarea.set_style(theme::canvas());
@@ -633,6 +664,7 @@ impl App {
             Mode::Calculator => self.handle_calc_key(key),
             Mode::ReplaceAsk => self.handle_replace_key(key),
             Mode::Outline => self.handle_outline_key(key),
+            Mode::Spell => self.handle_spell_key(key),
         }
     }
 
@@ -854,6 +886,11 @@ impl App {
         };
         match (key.code, ctrl) {
             (KeyCode::Esc, _) => {
+                if p.kind == PromptKind::SpellReplace && self.spell.is_some() {
+                    // Back to the spelling question.
+                    self.mode = Mode::Spell;
+                    return;
+                }
                 self.mode = Mode::Editor;
                 self.after_save = None;
                 self.set_status("Cancelled.");
@@ -1023,6 +1060,14 @@ impl App {
                 let name = self.prompt.input.clone();
                 self.mode = Mode::Editor;
                 self.insert_file(&name);
+            }
+            PromptKind::SpellReplace => {
+                let with = self.prompt.input.clone();
+                match self.spell.clone() {
+                    Some(session) if !with.is_empty() => self.spell_replace(&session, &with),
+                    Some(_) => self.mode = Mode::Spell,
+                    None => self.mode = Mode::Editor,
+                }
             }
             PromptKind::SetMarker | PromptKind::GotoMarker => {
                 let set = self.prompt.kind == PromptKind::SetMarker;
@@ -2089,6 +2134,193 @@ impl App {
         }
     }
 
+    /// The spelling dictionary for this document (its frontmatter `language:`,
+    /// US English by default), loaded the first time it's needed.
+    pub fn speller(&self) -> Option<&crate::spell::Speller> {
+        self.speller
+            .get_or_init(|| {
+                let language = crate::attributes::frontmatter_value(self.textarea.lines(), "language");
+                crate::spell::Speller::load(language.as_deref())
+            })
+            .as_ref()
+            .ok()
+    }
+
+    fn speller_mut(&mut self) -> Option<&mut crate::spell::Speller> {
+        self.speller();
+        self.speller.get_mut()?.as_mut().ok()
+    }
+
+    /// Why spelling is unavailable, if it is.
+    fn speller_error(&self) -> Option<String> {
+        self.speller();
+        self.speller.get()?.as_ref().err().cloned()
+    }
+
+    /// View ▸ Spelling Highlights: underline unknown words as you write.
+    pub fn toggle_spell_highlight(&mut self) {
+        self.spell_highlight = !self.spell_highlight;
+        self.set_status(if self.spell_highlight {
+            "Spelling highlights on."
+        } else {
+            "Spelling highlights off."
+        });
+    }
+
+    /// `^QL` — check the spelling from the cursor to the end of the document,
+    /// stopping at each unknown word.
+    pub fn start_spell_check(&mut self) {
+        if let Some(e) = self.speller_error() {
+            return self.set_status(e);
+        }
+        self.remember_position();
+        self.clear_marking();
+        let from = self.cursor_pos();
+        self.advance_spell(from, 0);
+    }
+
+    /// `^QN` — check the spelling of the word at the cursor.
+    pub fn spell_check_word(&mut self) {
+        if let Some(e) = self.speller_error() {
+            return self.set_status(e);
+        }
+        let (row, col) = self.cursor_pos();
+        let line = &self.textarea.lines()[row];
+        let Some((s, e)) = crate::spell::word_at(line, col) else {
+            return self.set_status("No word at the cursor.");
+        };
+        let word: String = line.chars().skip(s).take(e - s).collect();
+        if self.speller().is_some_and(|sp| sp.is_correct(&word)) {
+            return self.set_status(format!("\u{201C}{word}\u{201D} is spelled correctly."));
+        }
+        self.clear_marking();
+        self.ask_about_word(word, (row, s), (row, e), 0, true);
+    }
+
+    /// The next word the dictionary doesn't know, from `from` on.
+    fn next_misspelling(&self, from: (usize, usize)) -> Option<Misspelling> {
+        let speller = self.speller()?;
+        let lines = self.textarea.lines();
+        let prose = crate::spell::prose_lines(lines);
+        for (row, line) in lines.iter().enumerate().skip(from.0) {
+            if !prose[row] {
+                continue;
+            }
+            let chars: Vec<char> = line.chars().collect();
+            for (s, e) in crate::spell::words(line) {
+                if row == from.0 && s < from.1 {
+                    continue;
+                }
+                let word: String = chars[s..e].iter().collect();
+                if !speller.is_correct(&word) {
+                    return Some(((row, s), (row, e), word));
+                }
+            }
+        }
+        None
+    }
+
+    /// Move on to the next unknown word, or finish the check.
+    fn advance_spell(&mut self, from: (usize, usize), corrected: usize) {
+        match self.next_misspelling(from) {
+            Some((start, end, word)) => self.ask_about_word(word, start, end, corrected, false),
+            None => {
+                self.spell = None;
+                self.mode = Mode::Editor;
+                self.textarea.cancel_selection();
+                self.set_status(match corrected {
+                    0 => "Spelling check complete.".to_string(),
+                    n => format!("Spelling check complete — {n} correction(s)."),
+                });
+            }
+        }
+    }
+
+    /// Highlight an unknown word and ask what to do with it.
+    fn ask_about_word(&mut self, word: String, start: (usize, usize), end: (usize, usize), corrected: usize, single: bool) {
+        self.textarea.cancel_selection();
+        self.textarea.move_cursor(jump(start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(end));
+        let suggestions = self.speller().map(|s| s.suggestions(&word)).unwrap_or_default();
+        self.spell = Some(SpellSession {
+            word,
+            start,
+            end,
+            suggestions,
+            corrected,
+            single,
+        });
+        self.mode = Mode::Spell;
+        self.status_msg = None;
+    }
+
+    /// Replace the unknown word with `with` and carry on.
+    fn spell_replace(&mut self, session: &SpellSession, with: &str) {
+        self.textarea.cancel_selection();
+        self.textarea.move_cursor(jump(session.start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(session.end));
+        self.textarea.insert_str(with);
+        self.modified = true;
+        let after = self.cursor_pos();
+        self.spell_continue(session, after, session.corrected + 1);
+    }
+
+    fn spell_continue(&mut self, session: &SpellSession, from: (usize, usize), corrected: usize) {
+        if session.single {
+            self.spell = None;
+            self.mode = Mode::Editor;
+            self.textarea.cancel_selection();
+        } else {
+            self.advance_spell(from, corrected);
+        }
+    }
+
+    /// Keys while the spelling check asks about a word: a suggestion's number
+    /// replaces it; I ignores it, G ignores it everywhere, A adds it to your
+    /// dictionary, T types a replacement, Esc stops.
+    fn handle_spell_key(&mut self, key: KeyEvent) {
+        let Some(session) = self.spell.clone() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match key.code {
+            KeyCode::Char(d @ '1'..='9') => {
+                if let Some(with) = session.suggestions.get(d as usize - '1' as usize) {
+                    self.spell_replace(&session, &with.clone());
+                }
+            }
+            KeyCode::Char('i' | 'I') => self.spell_continue(&session, session.end, session.corrected),
+            KeyCode::Char('g' | 'G') => {
+                if let Some(s) = self.speller_mut() {
+                    s.ignore_all(&session.word);
+                }
+                self.spell_continue(&session, session.end, session.corrected);
+            }
+            KeyCode::Char('a' | 'A') => {
+                if let Some(s) = self.speller_mut() {
+                    s.add_to_personal(&session.word);
+                }
+                self.spell_continue(&session, session.end, session.corrected);
+                if self.mode == Mode::Editor {
+                    self.set_status(format!("Added \u{201C}{}\u{201D} to your dictionary.", session.word));
+                }
+            }
+            KeyCode::Char('t' | 'T') => {
+                self.open_prompt(PromptKind::SpellReplace, "Replace with:", session.word.clone());
+                self.prompt.fresh = false; // edit the word rather than retype it
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+                self.spell = None;
+                self.mode = Mode::Editor;
+                self.textarea.cancel_selection();
+                self.set_status("Spelling check stopped.");
+            }
+            _ => {}
+        }
+    }
+
     /// The document's headings (`#` … `######` outside code blocks and the
     /// frontmatter; a lone `#` is a scene break, not a heading), with the page
     /// each falls on.
@@ -3133,6 +3365,7 @@ impl App {
                 }
             }
             Mode::Outline => self.mouse_outline(me),
+            Mode::Spell => {}
             Mode::Prompt
             | Mode::Confirm
             | Mode::Header
@@ -4389,6 +4622,51 @@ mod tests {
         empty.textarea.insert_str("Just prose.");
         empty.open_outline();
         assert_eq!(empty.mode, Mode::Editor);
+    }
+
+    #[test]
+    fn spelling_check_walks_the_unknown_words() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("---\ntitle: Zzyzx\n---\nThe stormm broke over Zorblax.\n`codde` is fine.\nZorblax again, and recieve.");
+        app.textarea.move_cursor(CursorMove::Top);
+        chord(&mut app, 'q', 'l');
+        assert_eq!(app.mode, Mode::Spell);
+        let s = app.spell.clone().unwrap();
+        assert_eq!(s.word, "stormm", "frontmatter skipped");
+        assert_eq!(s.suggestions[0], "storm");
+        assert_eq!(app.textarea.selection_range(), Some(((3, 4), (3, 10))));
+        app.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(app.textarea.lines()[3], "The storm broke over Zorblax.");
+        assert_eq!(app.spell.as_ref().unwrap().word, "Zorblax");
+        app.handle_key(key(KeyCode::Char('g'))); // ignore all: skips the second one too
+        assert_eq!(app.spell.as_ref().unwrap().word, "recieve", "code span skipped");
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.mode, Mode::Prompt);
+        assert_eq!(app.prompt.input, "recieve", "the word, ready to edit");
+        app.handle_key(ctrl('y'));
+        type_str(&mut app, "receive");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.textarea.lines()[5], "Zorblax again, and receive.");
+        assert_eq!(app.mode, Mode::Editor);
+        assert!(app.status_msg.as_deref().unwrap().contains("2 correction"));
+    }
+
+    #[test]
+    fn spell_check_word_at_cursor() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("A fine dya.");
+        app.textarea.move_cursor(CursorMove::Jump(0, 3));
+        chord(&mut app, 'q', 'n');
+        assert!(app.status_msg.as_deref().unwrap().contains("spelled correctly"));
+        app.textarea.move_cursor(CursorMove::Jump(0, 10)); // end of "dya"
+        chord(&mut app, 'q', 'n');
+        assert_eq!(app.mode, Mode::Spell);
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(ctrl('y'));
+        type_str(&mut app, "day");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.textarea.lines(), ["A fine day."]);
+        assert_eq!(app.mode, Mode::Editor, "one word only");
     }
 
     #[test]

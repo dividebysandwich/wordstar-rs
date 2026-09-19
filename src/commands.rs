@@ -141,6 +141,11 @@ pub enum Command {
     GotoMarker(usize),
     /// List the headings (chapters) to jump to (^QG).
     GotoHeading,
+    /// Check spelling from the cursor on (^QL) / of the word at the cursor (^QN).
+    SpellCheck,
+    SpellWord,
+    /// Underline misspelled words as you write (View menu).
+    ToggleSpellHighlight,
     /// Ask which marker to set / go to (Edit menu).
     SetMarkerPrompt,
     GotoMarkerPrompt,
@@ -262,6 +267,9 @@ pub fn execute(app: &mut App, cmd: Command) {
         SetMarker(n) => app.set_marker(n),
         GotoMarker(n) => app.goto_marker(n),
         GotoHeading => app.open_outline(),
+        SpellCheck => app.start_spell_check(),
+        SpellWord => app.spell_check_word(),
+        ToggleSpellHighlight => app.toggle_spell_highlight(),
         SetMarkerPrompt => app.start_marker_prompt(true),
         GotoMarkerPrompt => app.start_marker_prompt(false),
 

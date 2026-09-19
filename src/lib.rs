@@ -19,6 +19,7 @@ pub mod menu;
 pub mod pdf;
 pub mod platform;
 pub mod preview;
+pub mod spell;
 pub mod theme;
 pub mod track;
 pub mod ui;

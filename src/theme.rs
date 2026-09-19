@@ -89,6 +89,13 @@ pub fn selection() -> Style {
     Style::default().bg(Color::Cyan).fg(Color::Black)
 }
 
+/// A word the spelling dictionary doesn't know.
+pub fn misspelled() -> Style {
+    Style::default()
+        .fg(Color::LightRed)
+        .add_modifier(ratatui::style::Modifier::UNDERLINED)
+}
+
 /// A place marker (`^K0`…`^K9`) in the text and in the flag column.
 pub fn marker() -> Style {
     Style::default().bg(Color::LightMagenta).fg(Color::Black)

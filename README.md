@@ -393,11 +393,42 @@ to open it and **←** to step back.
 - **Utilities** — Word Count · Spelling Check, Thesaurus, Calculator, Sort Block
 - **Help** — Help Topics, About
 
-A few WordStar features that have no equivalent here yet (printing, spell check,
-the thesaurus, the calculator, block sort) appear in the menus for familiarity
-but report that they are not implemented when chosen.
+A few WordStar features that have no equivalent here yet (printing, the
+thesaurus, block sort) appear in the menus for familiarity but report that they
+are not implemented when chosen.
 
 ---
+
+## Spelling
+
+Words the dictionary doesn't know are underlined in red as you write (turn
+that off with **View → Spelling Highlights**). The word you're still typing is
+left alone until you move on.
+
+| Keys  | Action |
+| ----- | ------ |
+| `^QL` | Check the spelling from the cursor to the end |
+| `^QN` | Check the word at the cursor |
+
+The check stops at each unknown word, highlights it, and lists suggestions:
+
+| Key | Does |
+| --- | ---- |
+| `1`–`9` | Replace the word with that suggestion |
+| `I` | Ignore it here |
+| `G` | Ignore it everywhere, for this session |
+| `A` | Add it to your personal dictionary — the place for your characters' names and invented words |
+| `T` | Type the replacement yourself |
+| `Esc` | Stop checking |
+
+Your personal dictionary is a plain word list in
+`~/.config/wordstar-rs/words.txt` (Linux; in the browser it's kept in the
+browser's storage). US English is built in. For another language, name it in
+the frontmatter — `language: en_GB`, `language: de_DE` — and WordStar-rs uses
+that Hunspell dictionary if it's installed (as on most Linux systems). The
+frontmatter, dot commands, code, links and web addresses are never checked.
+(The built-in dictionary is the SCOWL-based en_US Hunspell dictionary; see
+`assets/dict/LICENSE-en_US.txt` for its license.)
 
 ## The file browser
 

@@ -275,11 +275,20 @@ fn frontmatter_of<'a>(mut lines: impl Iterator<Item = &'a str>) -> Vec<(String, 
     out
 }
 
+/// The first value of frontmatter `key` in the document, if set.
+pub fn frontmatter_value(lines: &[String], key: &str) -> Option<String> {
+    frontmatter_of(lines.iter().map(String::as_str))
+        .into_iter()
+        .find(|(k, _)| k == key)?
+        .1
+        .into_iter()
+        .next()
+}
+
 /// The document's word-count goal (`goal: 80000`, `goal: 80,000` or
 /// `goal: 80k` in the frontmatter), if it sets one.
 pub fn word_goal(lines: &[String]) -> Option<usize> {
-    let fm = frontmatter_of(lines.iter().map(String::as_str));
-    let raw = fm.iter().find(|(k, _)| k == "goal")?.1.first()?.to_ascii_lowercase();
+    let raw = frontmatter_value(lines, "goal")?.to_ascii_lowercase();
     let (digits, scale) = match raw.strip_suffix('k') {
         Some(d) => (d, 1000),
         None => (raw.as_str(), 1),

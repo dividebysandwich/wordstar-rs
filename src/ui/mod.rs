@@ -71,6 +71,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         // The question is on the status line; the match stays in view.
         Mode::ReplaceAsk => {}
         Mode::Outline => outline_overlay(frame, area, app),
+        Mode::Spell => spell_overlay(frame, rows[4], app),
     }
 }
 
@@ -116,6 +117,7 @@ fn editor_pane(frame: &mut Frame, area: Rect, text_area: Rect, app: &App) {
 
     let height = text_area.height as usize;
     let top = scroll_top(app, text_area);
+    misspelling_overlay(frame, text_area, top, app);
     block_overlay(frame, text_area, top, app);
     marker_overlay(frame, text_area, top, app);
     let rows = app.visual_rows.borrow();
@@ -192,6 +194,119 @@ fn block_overlay(frame: &mut Frame, text_area: Rect, top: usize, app: &App) {
             buf[(text_area.x + x as u16, text_area.y + y)].set_style(style);
         }
     }
+}
+
+/// Underline the words on screen that the spelling dictionary doesn't know
+/// (View ▸ Spelling Highlights) — except the one being typed at the cursor.
+fn misspelling_overlay(frame: &mut Frame, text_area: Rect, top: usize, app: &App) {
+    if !app.spell_highlight || app.mode == Mode::Spell {
+        return;
+    }
+    let Some(speller) = app.speller() else {
+        return;
+    };
+    let rows = app.visual_rows.borrow();
+    let lines = app.textarea.lines();
+    let tab = app.textarea.tab_length();
+    let prose = crate::spell::prose_lines(lines);
+    let cursor = app.textarea.cursor();
+    let style = theme::misspelled();
+    let buf = frame.buffer_mut();
+    // Misspelled word spans of the last logical line looked at.
+    let mut cached: Option<(usize, Vec<(usize, usize)>)> = None;
+    for y in 0..text_area.height {
+        let Some(row) = rows.get(top + y as usize) else {
+            break;
+        };
+        if !prose[row.line] {
+            continue;
+        }
+        if cached.as_ref().is_none_or(|(l, _)| *l != row.line) {
+            let line = &lines[row.line];
+            let chars: Vec<char> = line.chars().collect();
+            let bad = crate::spell::words(line)
+                .into_iter()
+                .filter(|&(_, e)| !(cursor.0 == row.line && cursor.1 == e))
+                .filter(|&(s, e)| !speller.is_correct(&chars[s..e].iter().collect::<String>()))
+                .collect();
+            cached = Some((row.line, bad));
+        }
+        let Some((_, bad)) = cached.as_ref() else {
+            continue;
+        };
+        let text = row.text(lines);
+        let start = row.start_col(lines);
+        let len = text.chars().count();
+        let offset = app.row_offset(text, text_area.width as usize);
+        for &(s, e) in bad {
+            let (a, b) = (s.max(start), e.min(start + len));
+            if a >= b {
+                continue;
+            }
+            let x0 = offset + crate::wrap::char_to_x(text, a - start, tab);
+            let x1 = (offset + crate::wrap::char_to_x(text, b - start, tab)).min(text_area.width as usize);
+            for x in x0..x1 {
+                buf[(text_area.x + x as u16, text_area.y + y)].set_style(style);
+            }
+        }
+    }
+}
+
+/// The spelling check's question: the unknown word, numbered suggestions, and
+/// the choices. Drawn at the bottom of the editor, or the top when the word is
+/// down there.
+fn spell_overlay(frame: &mut Frame, pane: Rect, app: &App) {
+    let Some(s) = app.spell.as_ref() else {
+        return;
+    };
+    let language = app.speller().map_or("", |sp| sp.language.as_str());
+    let width = pane.width.saturating_sub(4).min(78);
+    let inner_w = width.saturating_sub(4) as usize;
+    let mut lines = vec![Line::from(vec![
+        Span::raw(format!("Not in the {language} dictionary:  ")),
+        Span::styled(s.word.clone(), Style::default().add_modifier(Modifier::BOLD)),
+    ])];
+    lines.push(Line::default());
+    if s.suggestions.is_empty() {
+        lines.push(Line::from("(no suggestions)"));
+    } else {
+        // Numbered suggestions, wrapped to the box.
+        let mut row = String::new();
+        for (i, w) in s.suggestions.iter().enumerate() {
+            let item = format!("{} {w}   ", i + 1);
+            if !row.is_empty() && row.chars().count() + item.chars().count() > inner_w {
+                lines.push(Line::from(std::mem::take(&mut row)));
+            }
+            row.push_str(&item);
+        }
+        lines.push(Line::from(row));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "1-9 replace · I ignore · G ignore all · A add word · T type · Esc stop",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    let height = (lines.len() as u16 + 2).min(pane.height);
+    let cursor_y = app.textarea.screen_cursor().row.saturating_sub(app.scroll_top.get());
+    let y = if cursor_y as u16 >= pane.height / 2 {
+        pane.y
+    } else {
+        pane.y + pane.height - height
+    };
+    let rect = Rect::new(pane.x + (pane.width - width) / 2, y, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Spelling ")
+        .style(theme::status_bar());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let area = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(lines).style(theme::status_bar()), area);
 }
 
 /// Whether the document position `(line, col)` is shown on visual row `row`
@@ -1507,6 +1622,23 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let m = app.cursor_metrics();
         assert_eq!((m.page, m.line), (2, 1));
+    }
+
+    #[test]
+    fn misspelled_words_are_underlined_except_the_one_being_typed() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Teh cat sat\nnew wordd");
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let bad = theme::misspelled().fg.unwrap();
+        assert_eq!(buf[(0, 4)].fg, bad, "Teh");
+        assert!(buf[(2, 4)].modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(buf[(4, 4)].fg, bad, "cat is fine");
+        assert_ne!(buf[(4, 5)].fg, bad, "wordd is still being typed");
+        app.spell_highlight = false;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        assert_ne!(terminal.backend().buffer()[(0, 4)].fg, bad, "highlights off");
     }
 
     #[test]
