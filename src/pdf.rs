@@ -907,7 +907,7 @@ impl Layout {
 
 /// A manuscript's "about N words": rounded to the nearest hundred (exact below
 /// a hundred), with thousands separators.
-fn approximate_words(words: usize) -> String {
+pub(crate) fn approximate_words(words: usize) -> String {
     let n = if words < 100 {
         words
     } else {

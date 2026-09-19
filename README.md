@@ -576,8 +576,9 @@ in the top right, and the title and byline halfway down, where the story
 begins. Every later page carries the header `Surname / TITLE / page`. Scene
 breaks (`#` or `***`) print as a centered `#`, each `#` chapter heading starts a
 new page a third of the way down, and `END` marks the finish. Add
-`italics: underline` for the older convention of underlining italics. (The
-on-screen preview keeps its usual look; the layout applies to the PDF.)
+`italics: underline` for the older convention of underlining italics. **F5**
+previews the manuscript in the same layout, so you can proof it before
+exporting.
 
 The **Word Count** (`^K?`) counts what a reader would see, leaving out the
 frontmatter, dot commands, and Markdown markup. It also shows how many words

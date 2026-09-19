@@ -24,6 +24,11 @@ const CONTENT_W: f32 = 1000.0;
 const MARGIN: f32 = 56.0;
 const BODY: f32 = 23.0;
 const LINE: f32 = 1.4; // line-height multiplier
+/// Manuscript body size: a monospace face at 65 characters to `CONTENT_W`, as
+/// on a page of 12-point Courier with 1" margins.
+const MS_SIZE: f32 = CONTENT_W / 65.0 / 0.6;
+/// How far down a manuscript chapter's title starts on its page.
+const CHAPTER_DROP: u32 = 420;
 
 const PAGE_W: u32 = CONTENT_W as u32 + 2 * MARGIN as u32;
 // A4 proportion (1 : 1.414).
@@ -165,6 +170,12 @@ pub struct Job {
     strips: Vec<Strip>,
     setup: PageSetup,
     manuscript: Option<Manuscript>,
+    /// Words in the document, for a manuscript's title block.
+    words: usize,
+    /// Manuscript layout progress: the title block is out; the next `#`
+    /// heading is the first chapter (which stays on page one).
+    title_done: bool,
+    first_chapter: bool,
 }
 
 impl Job {
@@ -190,6 +201,9 @@ impl Job {
             strips: Vec::with_capacity(cap),
             setup,
             manuscript: opts.manuscript,
+            words: crate::attributes::count_words(&markdown.lines().map(str::to_owned).collect::<Vec<_>>()).words,
+            title_done: false,
+            first_chapter: true,
         })
     }
 
@@ -215,6 +229,25 @@ impl Job {
             CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 while self.next < self.blocks.len() {
+                    if let Some(m) = &self.manuscript {
+                        // Standard manuscript format, as the PDF lays it out.
+                        if !self.title_done {
+                            self.strips.extend(title_block(fs, &mut cache, m, self.words));
+                            self.title_done = true;
+                        }
+                        let block = &self.blocks[self.next];
+                        let strips = manuscript_strips(fs, &mut cache, block, &mut self.first_chapter);
+                        self.strips.extend(strips);
+                        if self.next + 1 == self.blocks.len() {
+                            let end = centered_line(fs, &mut cache, "END");
+                            self.strips.push(end);
+                        }
+                        self.next += 1;
+                        if crate::platform::now_ms() - start >= budget_ms {
+                            break;
+                        }
+                        continue;
+                    }
                     let strip = match &self.blocks[self.next] {
                         Block::PageBreak => Strip::PageBreak,
                         block => Strip::Image {
@@ -265,13 +298,14 @@ impl Job {
         index: usize,
     ) {
         let number = self.setup.first_page + index;
+        let ms = self.manuscript.is_some();
         let margin = MARGIN as i64;
         let right = |img: &RgbaImage| PAGE_W as i64 - margin - img.width() as i64;
         let header = match (self.setup.header(number), &self.manuscript) {
-            (Some(text), _) => Some((label(fs, cache, &text), margin)),
+            (Some(text), _) => Some((label(fs, cache, &text, ms), margin)),
             (None, Some(m)) if index > 0 => {
                 let text = format!("{} / {} / {number}", m.surname, m.title.to_uppercase());
-                let img = label(fs, cache, &text);
+                let img = label(fs, cache, &text, ms);
                 let x = right(&img);
                 Some((img, x))
             }
@@ -282,9 +316,9 @@ impl Job {
             imageops::replace(page, &img, x, y);
         }
         let footer = match self.setup.footer(number) {
-            Some(text) => Some((label(fs, cache, &text), false)),
+            Some(text) => Some((label(fs, cache, &text, ms), false)),
             None if self.manuscript.is_none() && !self.setup.omit_page_numbers => {
-                Some((label(fs, cache, &format!("- {number} -")), true))
+                Some((label(fs, cache, &format!("- {number} -"), ms), true))
             }
             None => None,
         };
@@ -301,9 +335,14 @@ impl Job {
 }
 
 /// A one-line label (running header, footer, page number), cropped to its text.
-fn label(fs: &mut FontSystem, cache: &mut SwashCache, text: &str) -> RgbaImage {
-    let size = 17.0;
-    let mut buffer = text_buffer(fs, &[Seg::plain(text)], size, Family::SansSerif, CONTENT_W, false);
+fn label(fs: &mut FontSystem, cache: &mut SwashCache, text: &str, manuscript: bool) -> RgbaImage {
+    // A manuscript's header is in its body type; otherwise a small sans.
+    let (size, family) = if manuscript {
+        (MS_SIZE, Family::Monospace)
+    } else {
+        (17.0, Family::SansSerif)
+    };
+    let mut buffer = text_buffer(fs, &[Seg::plain(text)], size, family, CONTENT_W, None, LINE);
     let (w, h) = buffer
         .layout_runs()
         .fold((0.0f32, 0.0f32), |(w, h), r| (w.max(r.line_w), h.max(r.line_top + r.line_height)));
@@ -323,6 +362,118 @@ fn heading_px(level: u8) -> f32 {
     }
 }
 
+/// A manuscript's strip for `block`: monospaced and double-spaced, every
+/// paragraph indented, scene breaks as a centered `#`, and each chapter after
+/// the first on a new page, a third of the way down.
+fn manuscript_strips(
+    fs: &mut FontSystem,
+    cache: &mut SwashCache,
+    block: &Block,
+    first_chapter: &mut bool,
+) -> Vec<Strip> {
+    let ms = Look::manuscript();
+    let image = |img| Strip::Image {
+        img,
+        gap_after: false,
+    };
+    match block {
+        Block::Heading(level, segs) => {
+            let mut out = Vec::new();
+            if *level == 1 && !std::mem::take(first_chapter) {
+                out.push(Strip::PageBreak);
+                out.push(image(blank(CHAPTER_DROP)));
+            }
+            let segs = crate::pdf::take_centered(segs).1;
+            let look = Look {
+                placement: Placement::Center,
+                ..ms
+            };
+            out.push(image(text_strip(fs, cache, &segs, &look)));
+            out.push(image(blank((MS_SIZE * 2.0) as u32)));
+            out
+        }
+        Block::Para { segs, .. } => {
+            let (centered, mut segs) = crate::pdf::take_centered(segs);
+            let placement = if centered {
+                Placement::Center
+            } else {
+                if let Some(first) = segs.first_mut() {
+                    // Half an inch: five characters.
+                    first.text.insert_str(0, "\u{A0}\u{A0}\u{A0}\u{A0}\u{A0}");
+                }
+                Placement::Left(0.0)
+            };
+            vec![image(text_strip(fs, cache, &segs, &Look { placement, ..ms }))]
+        }
+        Block::Rule => vec![centered_line(fs, cache, "#")],
+        Block::PageBreak => vec![Strip::PageBreak],
+        other => vec![image(build_strip(fs, cache, other))],
+    }
+}
+
+/// One centered manuscript line (a scene break's `#`, `END`).
+fn centered_line(fs: &mut FontSystem, cache: &mut SwashCache, text: &str) -> Strip {
+    let look = Look {
+        placement: Placement::Center,
+        ..Look::manuscript()
+    };
+    Strip::Image {
+        img: text_strip(fs, cache, &[Seg::plain(text)], &look),
+        gap_after: false,
+    }
+}
+
+/// Page one of a manuscript: name and contact details top left, the word count
+/// top right, and the title and byline halfway down.
+fn title_block(fs: &mut FontSystem, cache: &mut SwashCache, m: &Manuscript, words: usize) -> Vec<Strip> {
+    let ms = Look::manuscript();
+    let single = Look { line: 1.25, ..ms };
+    let contact: Vec<&str> = std::iter::once(m.author.as_str())
+        .chain(m.contact.iter().map(String::as_str))
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut top = text_strip(fs, cache, &[Seg::plain(contact.join("\n"))], &single);
+    let count = format!("about {} words", crate::pdf::approximate_words(words));
+    let right = Look {
+        placement: Placement::Right,
+        ..single
+    };
+    darken_onto(&mut top, &text_strip(fs, cache, &[Seg::plain(count)], &right));
+    let drop = (PAGE_H / 2).saturating_sub(MARGIN as u32 + top.height() + (MS_SIZE * 2.0) as u32);
+    let centered = Look {
+        placement: Placement::Center,
+        ..ms
+    };
+    let image = |img| Strip::Image {
+        img,
+        gap_after: false,
+    };
+    vec![
+        image(top),
+        image(blank(drop)),
+        image(text_strip(fs, cache, &[Seg::plain(m.title.clone())], &centered)),
+        image(text_strip(fs, cache, &[Seg::plain(format!("by {}", m.byline))], &centered)),
+        image(blank((MS_SIZE * 2.0) as u32)),
+    ]
+}
+
+/// An empty strip `height` pixels tall.
+fn blank(height: u32) -> RgbaImage {
+    RgbaImage::from_pixel(1, height.max(1), Rgba(PAPER))
+}
+
+/// Combine two strips of paper-white background: the darker pixel wins.
+fn darken_onto(dst: &mut RgbaImage, src: &RgbaImage) {
+    for (x, y, p) in src.enumerate_pixels() {
+        if x < dst.width() && y < dst.height() {
+            let d = dst.get_pixel_mut(x, y);
+            for c in 0..3 {
+                d[c] = d[c].min(p[c]);
+            }
+        }
+    }
+}
+
 /// Render a single block to a full-content-width strip image.
 fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> RgbaImage {
     match block {
@@ -335,15 +486,13 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                     ..s.clone()
                 })
                 .collect();
-            text_strip(
-                fs,
-                cache,
-                &bold,
-                heading_px(*level),
-                Family::SansSerif,
-                if centered { Placement::Center } else { Placement::Left(0.0) },
-                HEADING,
-            )
+            let style = Look {
+                size: heading_px(*level),
+                placement: if centered { Placement::Center } else { Placement::Left(0.0) },
+                color: HEADING,
+                ..Look::body()
+            };
+            text_strip(fs, cache, &bold, &style)
         }
         Block::Para { segs, indent } => {
             let (centered, mut segs) = crate::pdf::take_centered(segs);
@@ -354,8 +503,8 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                 // A first-line indent of about one em.
                 first.text.insert_str(0, "\u{A0}\u{A0}\u{A0}\u{A0}");
             }
-            let place = if centered { Placement::Center } else { Placement::Left(0.0) };
-            text_strip(fs, cache, &segs, BODY, Family::SansSerif, place, TEXT)
+            let placement = if centered { Placement::Center } else { Placement::Left(0.0) };
+            text_strip(fs, cache, &segs, &Look { placement, ..Look::body() })
         }
         Block::Item {
             depth,
@@ -365,11 +514,17 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             let indent = (*depth as f32) * 28.0;
             let mut all = vec![Seg::plain(marker.clone())];
             all.extend(segs.iter().cloned());
-            text_strip(fs, cache, &all, BODY, Family::SansSerif, Placement::Left(indent), TEXT)
+            text_strip(fs, cache, &all, &Look { placement: Placement::Left(indent), ..Look::body() })
         }
         Block::Code(lines) => {
             let seg = Seg::plain(lines.join("\n"));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, Placement::Left(0.0), CODE)
+            let style = Look {
+                size: BODY - 3.0,
+                family: Family::Monospace,
+                color: CODE,
+                ..Look::body()
+            };
+            text_strip(fs, cache, &[seg], &style)
         }
         Block::Quote(segs) => {
             let italic: Vec<Seg> = segs
@@ -379,14 +534,25 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                     ..s.clone()
                 })
                 .collect();
-            text_strip(fs, cache, &italic, BODY, Family::Serif, Placement::Left(28.0), QUOTE)
+            let style = Look {
+                family: Family::Serif,
+                placement: Placement::Left(28.0),
+                color: QUOTE,
+                ..Look::body()
+            };
+            text_strip(fs, cache, &italic, &style)
         }
         Block::Rule => rule_strip(),
         // Handled by the job before a strip is built; nothing to draw.
         Block::PageBreak => RgbaImage::from_pixel(1, 1, Rgba(PAPER)),
         Block::Table { header, rows } => {
             let seg = Seg::plain(ascii_table(header, rows));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, Placement::Left(0.0), TEXT)
+            let style = Look {
+                size: BODY - 3.0,
+                family: Family::Monospace,
+                ..Look::body()
+            };
+            text_strip(fs, cache, &[seg], &style)
         }
     }
 }
@@ -398,23 +564,60 @@ enum Placement {
     Left(f32),
     /// Each line centered.
     Center,
+    /// Each line against the right edge.
+    Right,
 }
 
-/// Render `segs` into a strip of width `CONTENT_W`, placed per `placement`.
-fn text_strip(
-    fs: &mut FontSystem,
-    cache: &mut SwashCache,
-    segs: &[Seg],
+/// How a strip's text is set.
+#[derive(Clone, Copy)]
+struct Look {
     size: f32,
     family: Family<'static>,
     placement: Placement,
     color: [u8; 3],
-) -> RgbaImage {
-    let (indent, center) = match placement {
-        Placement::Left(indent) => (indent, false),
-        Placement::Center => (0.0, true),
+    /// Line height, as a multiple of the size.
+    line: f32,
+}
+
+impl Look {
+    /// Body text of the usual preview.
+    fn body() -> Look {
+        Look {
+            size: BODY,
+            family: Family::SansSerif,
+            placement: Placement::Left(0.0),
+            color: TEXT,
+            line: LINE,
+        }
+    }
+
+    /// Body text of a manuscript: monospaced, 65 characters to the line,
+    /// double-spaced.
+    fn manuscript() -> Look {
+        Look {
+            size: MS_SIZE,
+            family: Family::Monospace,
+            line: 2.0,
+            ..Look::body()
+        }
+    }
+}
+
+/// Render `segs` into a strip of width `CONTENT_W`, set in `style`.
+fn text_strip(fs: &mut FontSystem, cache: &mut SwashCache, segs: &[Seg], style: &Look) -> RgbaImage {
+    let Look {
+        size,
+        family,
+        placement,
+        color,
+        line,
+    } = *style;
+    let (indent, align) = match placement {
+        Placement::Left(indent) => (indent, None),
+        Placement::Center => (0.0, Some(cosmic_text::Align::Center)),
+        Placement::Right => (0.0, Some(cosmic_text::Align::Right)),
     };
-    let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent, center);
+    let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent, align, line);
     let h = buffer
         .layout_runs()
         .map(|r| r.line_top + r.line_height)
@@ -523,17 +726,18 @@ fn paginate(strips: &[Strip]) -> Vec<RgbaImage> {
     pages
 }
 
-/// Build a shaped text buffer for `segs` at `size`, wrapping to `wrap_w`
-/// (each line centered, if `center`).
+/// Build a shaped text buffer for `segs` at `size` with `line` spacing,
+/// wrapping to `wrap_w`, each line aligned per `align` (left by default).
 fn text_buffer(
     fs: &mut FontSystem,
     segs: &[Seg],
     size: f32,
     family: Family<'static>,
     wrap_w: f32,
-    center: bool,
+    align: Option<cosmic_text::Align>,
+    line: f32,
 ) -> Buffer {
-    let mut buffer = Buffer::new(fs, Metrics::new(size, size * LINE));
+    let mut buffer = Buffer::new(fs, Metrics::new(size, size * line));
     buffer.set_size(Some(wrap_w.max(50.0)), None);
     let default = Attrs::new().family(family);
     let spans: Vec<(String, Attrs)> = segs
@@ -544,7 +748,7 @@ fn text_buffer(
         spans.iter().map(|(t, a)| (t.as_str(), a.clone())),
         &default,
         Shaping::Advanced,
-        center.then_some(cosmic_text::Align::Center),
+        align,
     );
     buffer.shape_until_scroll(fs, false);
     buffer
@@ -666,6 +870,16 @@ mod tests {
             lines.iter().all(|l| l.chars().count() == w),
             "ragged table:\n{t}"
         );
+    }
+
+    #[test]
+    fn manuscript_preview_starts_later_chapters_on_a_new_page() {
+        let md = "---\nformat: manuscript\ntitle: T\nauthor: A. Writer\n---\n# One\nText.\n# Two\nMore.";
+        let Some(mut job) = Job::new(md) else {
+            return; // no system fonts in this environment
+        };
+        job.step(60_000.0);
+        assert_eq!(job.finish().len(), 2, "title page with chapter one, then chapter two");
     }
 
     #[test]
