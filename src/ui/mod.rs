@@ -1291,7 +1291,7 @@ fn style_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled("  ", theme::style_bar()),
         align_letter("L", app.align == AlignChoice::Left),
         Span::styled(" ", theme::style_bar()),
-        align_letter("C", app.align == AlignChoice::Center),
+        align_letter("C", app.align == AlignChoice::Center || app.cursor_centered()),
         Span::styled(" ", theme::style_bar()),
         align_letter("R", app.align == AlignChoice::Right),
         Span::styled(" ", theme::style_bar()),

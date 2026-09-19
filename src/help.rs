@@ -111,6 +111,7 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^KY", "Delete block (kept in the buffer)");
     row(&mut out, "^KH", "Hide / redisplay the block");
     row(&mut out, "^KW", "Write the block to a file");
+    row(&mut out, "^KZ", "Sort the block's lines");
     row(&mut out, "^K\" ^K' ^K.", "Block to UPPER / lower / Sentence case");
 
     head(&mut out, "Formatting (markdown)");
@@ -124,8 +125,8 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^OD", "Hide / show formatting markup");
     row(&mut out, "^OW", "Toggle word wrap");
     row(&mut out, "^OR", "Right margin (wrap column)");
-    row(&mut out, "^OC", "Center the paragraph");
-    row(&mut out, "^OL / ^O]", "Align left / right");
+    row(&mut out, "^OC", "Center the line in print (.oc on/off)");
+    row(&mut out, "^OL / ^O]", "Align on-screen text left / right");
     row(&mut out, "^OJ", "Justify");
 
     head(&mut out, "Mouse");

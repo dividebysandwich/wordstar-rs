@@ -195,7 +195,13 @@ impl Doc {
                         ));
                         pending_break = false;
                     }
-                    xml.push_str(&paragraph(&format!(r#"<w:pStyle w:val="Heading{level}"/>"#), segs, self));
+                    let (centered, segs) = crate::pdf::take_centered(segs);
+                    let jc = if centered { r#"<w:jc w:val="center"/>"# } else { "" };
+                    xml.push_str(&paragraph(&format!(r#"<w:pStyle w:val="Heading{level}"/>{jc}"#), &segs, self));
+                }
+                Block::Para { segs, .. } if crate::pdf::take_centered(segs).0 => {
+                    let segs = crate::pdf::take_centered(segs).1;
+                    xml.push_str(&paragraph(r#"<w:ind w:firstLine="0"/><w:jc w:val="center"/>"#, &segs, self));
                 }
                 Block::Para { segs, indent } => {
                     let ppr = if self.manuscript.is_none() && self.prose {

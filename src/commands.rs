@@ -156,6 +156,8 @@ pub enum Command {
     ToggleSpellHighlight,
     /// Write the marked block to a file (^KW).
     WriteBlock,
+    /// Sort the lines of the marked block (^KZ).
+    SortBlock,
     /// Change the case of the marked block (^K" upper, ^K' lower, ^K. sentence).
     ChangeCase(crate::app::Case),
     /// Ask which marker to set / go to (Edit menu).
@@ -260,7 +262,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         ClearFormat => app.clear_formatting(),
 
         AlignLeft => app.set_align(AlignChoice::Left),
-        AlignCenter => app.set_align(AlignChoice::Center),
+        AlignCenter => app.toggle_center(),
         AlignRight => app.set_align(AlignChoice::Right),
         AlignJustify => app.set_align(AlignChoice::Justify),
 
@@ -287,6 +289,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         SpellWord => app.spell_check_word(),
         ToggleSpellHighlight => app.toggle_spell_highlight(),
         WriteBlock => app.start_write_block(),
+        SortBlock => app.sort_block(),
         ChangeCase(case) => app.change_case(case),
         SetMarkerPrompt => app.start_marker_prompt(true),
         GotoMarkerPrompt => app.start_marker_prompt(false),

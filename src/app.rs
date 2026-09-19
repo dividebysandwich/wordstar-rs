@@ -3024,6 +3024,115 @@ impl App {
         }
     }
 
+    /// `^OC` — center the current line (or the marked block's lines) in print,
+    /// with WordStar's `.oc on` / `.oc off` dot commands around it. On a line
+    /// that is already centered, the centering is taken off again.
+    pub fn toggle_center(&mut self) {
+        let cursor = self.cursor_pos();
+        let (first, last) = match self.visible_block() {
+            // A block ending at the start of a line doesn't take that line.
+            Some(b) if b.end.1 == 0 && b.end.0 > b.start.0 => (b.start.0, b.end.0 - 1),
+            Some(b) => (b.start.0, b.end.0),
+            None => (cursor.0, cursor.0),
+        };
+        let lines = self.textarea.lines();
+        let is_centered = crate::attributes::centered_lines(lines)[first];
+        let command_at = |r: usize, on: bool| crate::attributes::center_command(&lines[r]) == Some(on);
+        let on = (0..first).rev().find(|&r| command_at(r, true));
+        let off = (last + 1..lines.len()).find(|&r| command_at(r, false));
+        self.clear_marking();
+        if is_centered {
+            let mut steps = 0;
+            // The lower line first, so the upper one's row still holds.
+            for row in [off, on].into_iter().flatten() {
+                self.delete_line_at(row);
+                steps += 1;
+            }
+            self.group_undo(steps);
+            let shift = usize::from(on.is_some_and(|r| r < cursor.0));
+            self.textarea.move_cursor(jump((cursor.0 - shift, cursor.1)));
+            self.set_status("Centering removed.");
+        } else {
+            self.insert_line_at(last + 1, ".oc off");
+            self.insert_line_at(first, ".oc on");
+            self.group_undo(2);
+            self.textarea.move_cursor(jump((cursor.0 + 1, cursor.1)));
+            self.set_status("Centered in print (between .oc on and .oc off). ^OC again removes it.");
+        }
+        self.modified = true;
+    }
+
+    /// `^KZ` — sort the lines of the marked block (or the selection)
+    /// alphabetically, ignoring case; lines that compare equal keep their order.
+    pub fn sort_block(&mut self) {
+        let range = self
+            .textarea
+            .selection_range()
+            .filter(|(s, e)| s != e)
+            .or_else(|| self.visible_block().map(|b| (b.start, b.end)));
+        let Some((start, end)) = range else {
+            return self.set_status("Mark the lines to sort first — ^KB, move, ^KK.");
+        };
+        let last = if end.1 == 0 && end.0 > start.0 { end.0 - 1 } else { end.0 };
+        let first = start.0;
+        let original: Vec<String> = self.textarea.lines()[first..=last].to_vec();
+        if original.len() < 2 {
+            return self.set_status("Mark two or more lines to sort.");
+        }
+        let mut sorted = original.clone();
+        sorted.sort_by_key(|l| l.to_lowercase());
+        let hidden = self.marked.as_ref().is_some_and(|b| b.hidden);
+        self.clear_marking();
+        if sorted == original {
+            return self.set_status("The lines are already in order.");
+        }
+        let end = (last, original[last - first].chars().count());
+        let text = sorted.join("\n");
+        self.replace_range((first, 0), end, &text);
+        self.marked = Some(MarkedBlock {
+            start: (first, 0),
+            end: (last, sorted[last - first].chars().count()),
+            text,
+            hidden,
+        });
+        self.set_status(format!("Sorted {} lines.", sorted.len()));
+    }
+
+    /// Insert `text` as a line of its own before row `row` (or after the last).
+    fn insert_line_at(&mut self, row: usize, text: &str) {
+        let lines = self.textarea.lines();
+        if row < lines.len() {
+            self.textarea.move_cursor(jump((row, 0)));
+            self.textarea.insert_str(format!("{text}\n"));
+        } else {
+            let last = lines.len() - 1;
+            let len = lines[last].chars().count();
+            self.textarea.move_cursor(jump((last, len)));
+            self.textarea.insert_str(format!("\n{text}"));
+        }
+    }
+
+    /// Delete row `row` entirely, with its line break.
+    fn delete_line_at(&mut self, row: usize) {
+        let lines = self.textarea.lines();
+        if row + 1 < lines.len() {
+            self.delete_range((row, 0), (row + 1, 0));
+        } else if row > 0 {
+            let prev = lines[row - 1].chars().count();
+            let len = lines[row].chars().count();
+            self.delete_range((row - 1, prev), (row, len));
+        }
+    }
+
+    /// Whether the cursor's line is centered in print (inside `.oc on`).
+    pub fn cursor_centered(&self) -> bool {
+        let row = self.cursor_pos().0;
+        crate::attributes::centered_lines(self.textarea.lines())
+            .get(row)
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// Set the paragraph alignment (also updates the widget where it can).
     pub fn set_align(&mut self, choice: AlignChoice) {
         self.align = choice;
@@ -5328,6 +5437,40 @@ mod tests {
         chord(&mut app, 'k', 'v');
         app.handle_key(ctrl('u'));
         assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+    }
+
+    #[test]
+    fn ctrl_kz_sorts_the_marked_lines() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Cast:\nzelda\nAnn\nbob\nThe end.");
+        app.textarea.move_cursor(CursorMove::Jump(1, 0));
+        chord(&mut app, 'k', 'b');
+        app.textarea.move_cursor(CursorMove::Jump(4, 0)); // up to the start of line 4
+        chord(&mut app, 'k', 'k');
+        chord(&mut app, 'k', 'z');
+        assert_eq!(app.textarea.lines(), ["Cast:", "Ann", "bob", "zelda", "The end."]);
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["Cast:", "zelda", "Ann", "bob", "The end."]);
+    }
+
+    #[test]
+    fn ctrl_oc_centers_the_line_in_print_and_back() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Intro.\nFor my mother.\nChapter text.");
+        app.textarea.move_cursor(CursorMove::Jump(1, 4));
+        chord(&mut app, 'o', 'c');
+        assert_eq!(app.textarea.lines(), ["Intro.", ".oc on", "For my mother.", ".oc off", "Chapter text."]);
+        assert_eq!(app.textarea.cursor(), (2, 4), "cursor stays on its text");
+        assert!(app.cursor_centered());
+        chord(&mut app, 'o', 'c');
+        assert_eq!(app.textarea.lines(), ["Intro.", "For my mother.", "Chapter text."]);
+        assert_eq!(app.textarea.cursor(), (1, 4));
+        // The last line works too, and ^U undoes it in one go.
+        app.textarea.move_cursor(CursorMove::Bottom);
+        chord(&mut app, 'o', 'c');
+        assert_eq!(app.textarea.lines()[4], ".oc off");
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["Intro.", "For my mother.", "Chapter text."]);
     }
 
     #[test]

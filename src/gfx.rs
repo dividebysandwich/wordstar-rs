@@ -303,7 +303,7 @@ impl Job {
 /// A one-line label (running header, footer, page number), cropped to its text.
 fn label(fs: &mut FontSystem, cache: &mut SwashCache, text: &str) -> RgbaImage {
     let size = 17.0;
-    let mut buffer = text_buffer(fs, &[Seg::plain(text)], size, Family::SansSerif, CONTENT_W);
+    let mut buffer = text_buffer(fs, &[Seg::plain(text)], size, Family::SansSerif, CONTENT_W, false);
     let (w, h) = buffer
         .layout_runs()
         .fold((0.0f32, 0.0f32), |(w, h), r| (w.max(r.line_w), h.max(r.line_top + r.line_height)));
@@ -327,6 +327,7 @@ fn heading_px(level: u8) -> f32 {
 fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> RgbaImage {
     match block {
         Block::Heading(level, segs) => {
+            let (centered, segs) = crate::pdf::take_centered(segs);
             let bold: Vec<Seg> = segs
                 .iter()
                 .map(|s| Seg {
@@ -342,15 +343,19 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                 Family::SansSerif,
                 0.0,
                 HEADING,
+                centered,
             )
         }
         Block::Para { segs, indent } => {
-            let mut segs = segs.clone();
-            if *indent && let Some(first) = segs.first_mut() {
+            let (centered, mut segs) = crate::pdf::take_centered(segs);
+            if *indent
+                && !centered
+                && let Some(first) = segs.first_mut()
+            {
                 // A first-line indent of about one em.
                 first.text.insert_str(0, "\u{A0}\u{A0}\u{A0}\u{A0}");
             }
-            text_strip(fs, cache, &segs, BODY, Family::SansSerif, 0.0, TEXT)
+            text_strip(fs, cache, &segs, BODY, Family::SansSerif, 0.0, TEXT, centered)
         }
         Block::Item {
             depth,
@@ -360,11 +365,11 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             let indent = (*depth as f32) * 28.0;
             let mut all = vec![Seg::plain(marker.clone())];
             all.extend(segs.iter().cloned());
-            text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT)
+            text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT, false)
         }
         Block::Code(lines) => {
             let seg = Seg::plain(lines.join("\n"));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE)
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE, false)
         }
         Block::Quote(segs) => {
             let italic: Vec<Seg> = segs
@@ -374,19 +379,20 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                     ..s.clone()
                 })
                 .collect();
-            text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE)
+            text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE, false)
         }
         Block::Rule => rule_strip(),
         // Handled by the job before a strip is built; nothing to draw.
         Block::PageBreak => RgbaImage::from_pixel(1, 1, Rgba(PAPER)),
         Block::Table { header, rows } => {
             let seg = Seg::plain(ascii_table(header, rows));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT)
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT, false)
         }
     }
 }
 
-/// Render `segs` into a strip of width `CONTENT_W`, the text indented by `indent`.
+/// Render `segs` into a strip of width `CONTENT_W`, the text indented by
+/// `indent` (or `center`ed).
 fn text_strip(
     fs: &mut FontSystem,
     cache: &mut SwashCache,
@@ -395,8 +401,9 @@ fn text_strip(
     family: Family<'static>,
     indent: f32,
     color: [u8; 3],
+    center: bool,
 ) -> RgbaImage {
-    let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent);
+    let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent, center);
     let h = buffer
         .layout_runs()
         .map(|r| r.line_top + r.line_height)
@@ -505,13 +512,15 @@ fn paginate(strips: &[Strip]) -> Vec<RgbaImage> {
     pages
 }
 
-/// Build a shaped text buffer for `segs` at `size`, wrapping to `wrap_w`.
+/// Build a shaped text buffer for `segs` at `size`, wrapping to `wrap_w`
+/// (each line centered, if `center`).
 fn text_buffer(
     fs: &mut FontSystem,
     segs: &[Seg],
     size: f32,
     family: Family<'static>,
     wrap_w: f32,
+    center: bool,
 ) -> Buffer {
     let mut buffer = Buffer::new(fs, Metrics::new(size, size * LINE));
     buffer.set_size(Some(wrap_w.max(50.0)), None);
@@ -524,7 +533,7 @@ fn text_buffer(
         spans.iter().map(|(t, a)| (t.as_str(), a.clone())),
         &default,
         Shaping::Advanced,
-        None,
+        center.then_some(cosmic_text::Align::Center),
     );
     buffer.shape_until_scroll(fs, false);
     buffer

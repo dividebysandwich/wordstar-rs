@@ -102,7 +102,7 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'k' => {
             *state = ChordState::K;
             Resolution::Pending(
-                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H/W block  \" ' . case  0-9 marker",
+                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H/W/Z block  \" ' . case  0-9 marker",
             )
         }
         'q' => {
@@ -165,6 +165,7 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('r') => Resolution::Command(InsertFile),
         Some('?') => Resolution::Command(WordCount),
         Some('w') => Resolution::Command(WriteBlock),
+        Some('z') => Resolution::Command(SortBlock),
         Some('"') => Resolution::Command(ChangeCase(crate::app::Case::Upper)),
         Some('\'') => Resolution::Command(ChangeCase(crate::app::Case::Lower)),
         Some('.') => Resolution::Command(ChangeCase(crate::app::Case::Sentence)),
@@ -288,7 +289,7 @@ mod tests {
     fn unknown_chord_beeps_and_resets() {
         let mut st = ChordState::Idle;
         resolve(&mut st, ctrl_key('k'));
-        assert_eq!(resolve(&mut st, plain('z')), Resolution::Beep);
+        assert_eq!(resolve(&mut st, plain('g')), Resolution::Beep);
         assert_eq!(st, ChordState::Idle);
     }
 

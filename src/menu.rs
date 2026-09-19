@@ -160,7 +160,7 @@ static UTILITIES: &[MenuItem] = &[
     item("Check Word", "^QN", Command::SpellWord),
     item("Thesaurus...", "^QJ", Command::Thesaurus),
     item("Calculator", "^QM", Command::Calculator),
-    todo("Sort Block", "", "Sort block"),
+    item("Sort Block", "^KZ", Command::SortBlock),
 ];
 
 static HELP: &[MenuItem] = &[

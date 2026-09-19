@@ -186,6 +186,17 @@ pub(crate) enum Block {
     PageBreak,
 }
 
+/// Whether `segs` are marked to be centered (a `.oc on` line), and the segments
+/// without the marker.
+pub(crate) fn take_centered(segs: &[Seg]) -> (bool, Vec<Seg>) {
+    let mut segs = segs.to_vec();
+    let centered = segs
+        .first_mut()
+        .and_then(|s| s.text.strip_prefix(crate::attributes::CENTER).map(str::to_owned).map(|t| s.text = t))
+        .is_some();
+    (centered, segs)
+}
+
 /// Render `markdown` to PDF bytes. `title` is used as the document title
 /// (unless the frontmatter names one).
 pub fn export(markdown: &str, title: &str) -> Vec<u8> {
@@ -717,7 +728,24 @@ impl Layout {
     fn block(&mut self, block: &Block) {
         let st = self.style.clone();
         match block {
+            Block::Heading(level, segs) if take_centered(segs).0 && !st.manuscript => {
+                let size = st.heading_size(*level);
+                let bolded: Vec<Seg> = take_centered(segs)
+                    .1
+                    .into_iter()
+                    .map(|s| Seg { bold: true, ..s })
+                    .collect();
+                for line in wrap(&bolded, st.max_chars(size), 0) {
+                    self.centered(&line, size);
+                }
+            }
+            Block::Para { segs, .. } if take_centered(segs).0 => {
+                for line in wrap(&take_centered(segs).1, st.max_chars(st.body), 0) {
+                    self.centered(&line, st.body);
+                }
+            }
             Block::Heading(level, segs) if st.manuscript => {
+                let segs = &take_centered(segs).1;
                 // Chapters start on a new page, a third of the way down — except
                 // the first, which follows the title and byline on page one.
                 if *level == 1 && self.body_started && !self.at_top {
@@ -1172,6 +1200,25 @@ mod tests {
         let all: String = pages.iter().map(page_text).collect();
         assert!(all.contains("|#|"), "scene break as a centered #");
         assert!(all.contains("The end.|END|"), "END after the last line");
+    }
+
+    #[test]
+    fn oc_lines_are_centered() {
+        let pages = layout("Left.\n\n.oc on\nMiddle\n.oc off\n\nLeft again.");
+        let x_of = |needle: &str| {
+            let mut x = None;
+            let mut last = 0.0;
+            for op in &pages[0].ops {
+                match op {
+                    Op::SetTextMatrix { matrix: TextMatrix::Translate(px, _) } => last = px.0,
+                    Op::ShowText { items } if items.iter().any(|i| matches!(i, TextItem::Text(t) if t.contains(needle))) => x = Some(last),
+                    _ => {}
+                }
+            }
+            x.unwrap()
+        };
+        assert!(x_of("Middle") > x_of("Left.") + 100.0, "centered");
+        assert_eq!(x_of("Left again."), x_of("Left."));
     }
 
     #[test]

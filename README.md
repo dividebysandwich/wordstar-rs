@@ -231,6 +231,7 @@ or moved there.
 | `^KH` | Hide / redisplay the block      |
 | `^KW` | Write the block to a file (e.g. to keep a scene you're cutting) |
 | `^K"` / `^K'` / `^K.` | Block to UPPER case / lower case / Sentence case |
+| `^KZ` | Sort the block's lines alphabetically (a cast list, a glossary) |
 
 Bold, italic, and the other **Style** commands apply to the marked block too.
 The block stays attached to its text while you keep writing: typing before it
@@ -298,9 +299,9 @@ and **Esc** cancels.
 | `^OD` | Hide / show the formatting markup (a clean reading view) |
 | `^OW` | Word wrap on / off              |
 | `^OR` | Set the right margin (the column text wraps at) |
-| `^OC` | Center the paragraph            |
-| `^OL` / `^O]` | Align left / right       |
-| `^OJ` | Justify                         |
+| `^OC` | Center the line (or the marked block's lines) in print — again to undo |
+| `^OL` / `^O]` | Align the on-screen text left / right |
+| `^OJ` | Justify (on-screen)             |
 | `^OP` | Preview (same as F5)            |
 
 `^OD` is the modern equivalent of WordStar's "display control characters"
@@ -375,6 +376,7 @@ effect instead of appearing as text:
 | `.pn` *n* | Number the first page *n* |
 | `.rm` *n* | Right margin: wrap text at column *n* (`^OR` sets it) |
 | `.fi` *file* | Include another file here when printing (see *A book in several files*) |
+| `.oc on` / `.oc off` | Center the lines between them — a title, a dedication, a poem (`^OC` adds them) |
 
 In header and footer text, `#` prints the page number: `.fo Page #` gives
 "Page 1", "Page 2", and so on. Original WordStar files keep these dot commands

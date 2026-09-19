@@ -86,6 +86,34 @@ pub const UNDERLINE_END: char = '\u{E001}';
 /// was; the renderers turn that paragraph into a new page.
 pub const PAGE_BREAK: char = '\u{E002}';
 
+/// Private-use sentinel at the start of a paragraph or heading to be centered
+/// (a line inside `.oc on` … `.oc off`).
+pub const CENTER: char = '\u{E003}';
+
+/// `Some(true)` for a `.oc on` line, `Some(false)` for `.oc off`.
+pub fn center_command(line: &str) -> Option<bool> {
+    match dot_command(line) {
+        Some((name, arg)) if name == "oc" => Some(!arg.eq_ignore_ascii_case("off")),
+        _ => None,
+    }
+}
+
+/// For each line, whether it lies inside a centered region (`.oc on` … `.oc
+/// off`, WordStar's "center lines" dot command).
+pub fn centered_lines(lines: &[String]) -> Vec<bool> {
+    let mut on = false;
+    lines
+        .iter()
+        .map(|line| match dot_command(line) {
+            Some((name, arg)) if name == "oc" => {
+                on = !arg.eq_ignore_ascii_case("off");
+                false
+            }
+            _ => on,
+        })
+        .collect()
+}
+
 /// True if `line` is a WordStar dot command (a `.` at column 1 followed by a
 /// letter, e.g. `.he`, `.pa`). Such lines are print directives, not body text.
 pub fn is_dot_command(line: &str) -> bool {
@@ -111,6 +139,8 @@ fn dot_command(line: &str) -> Option<(String, &str)> {
 ///
 /// - `.pa` becomes a paragraph holding only [`PAGE_BREAK`]; other dot commands
 ///   are print directives and are dropped (see [`page_setup`]).
+/// - Between `.oc on` and `.oc off`, each line is its own paragraph (or
+///   heading) marked with [`CENTER`].
 /// - A line that is just `#` is a manuscript scene break and becomes a rule
 ///   (on its own it would be an empty heading).
 /// - With `paragraphs: lines`, every line of prose is its own paragraph and
@@ -123,6 +153,7 @@ fn dot_command(line: &str) -> Option<(String, &str)> {
 pub fn prepare_render_source(src: &str, opts: &RenderOptions) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut fence: Option<&str> = None;
+    let mut centering = false;
     for line in src.lines() {
         let trimmed = line.trim_start();
         if let Some(marker) = fence {
@@ -137,9 +168,11 @@ pub fn prepare_render_source(src: &str, opts: &RenderOptions) -> String {
             out.push(line.to_string());
             continue;
         }
-        if let Some((name, _)) = dot_command(line) {
-            if name == "pa" {
-                out.extend([String::new(), PAGE_BREAK.to_string(), String::new()]);
+        if let Some((name, arg)) = dot_command(line) {
+            match name.as_str() {
+                "pa" => out.extend([String::new(), PAGE_BREAK.to_string(), String::new()]),
+                "oc" => centering = !arg.eq_ignore_ascii_case("off"),
+                _ => {}
             }
             continue;
         }
@@ -153,6 +186,19 @@ pub fn prepare_render_source(src: &str, opts: &RenderOptions) -> String {
             line.to_string()
         };
         let mut rewritten = String::with_capacity(text.len());
+        if centering && !trimmed.is_empty() {
+            // Each centered line stands alone, marked for the renderers (after
+            // a heading's `#`s, so it stays a heading).
+            let level = trimmed.chars().take_while(|&c| c == '#').count();
+            let heading = level > 0 && trimmed[level..].starts_with(' ');
+            if heading || !is_structural(line) {
+                let (marker, body) = trimmed.split_at(if heading { level + 1 } else { 0 });
+                rewrite_spans(body.trim_start(), &mut rewritten);
+                let marked = format!("{marker}{CENTER}{rewritten}");
+                out.extend([String::new(), marked, String::new()]);
+                continue;
+            }
+        }
         if opts.prose_paragraphs && !is_structural(line) {
             rewrite_spans(text.trim_start(), &mut rewritten);
             out.extend([String::new(), rewritten, String::new()]);
@@ -863,6 +909,17 @@ mod tests {
             ..RenderOptions::default()
         };
         assert_eq!(prepare_render_source("a -- b", &plain), "a -- b");
+    }
+
+    #[test]
+    fn oc_regions_mark_each_line_centered() {
+        let out = prepare(".oc on\n# Epigraph\nThe sea, the sea.\n- a list stays\n.oc off\nPlain.");
+        assert!(out.contains(&format!("\n# {CENTER}Epigraph\n")), "{out:?}");
+        assert!(out.contains(&format!("\n{CENTER}The sea, the sea.\n")), "{out:?}");
+        assert!(out.contains("\n- a list stays"));
+        assert!(!out.contains(&format!("{CENTER}Plain")));
+        let lines: Vec<String> = [".oc on", "a", ".oc off", "b"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(centered_lines(&lines), [false, true, false, false]);
     }
 
     #[test]

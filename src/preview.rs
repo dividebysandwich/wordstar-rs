@@ -68,6 +68,8 @@ struct Renderer {
     prose: bool,
     /// The last block finished was a paragraph (for the prose indent).
     after_para: bool,
+    /// The line being built is centered (a `.oc on` line).
+    center: bool,
 }
 
 impl Renderer {
@@ -276,6 +278,18 @@ impl Renderer {
             }
             return;
         }
+        // A `.oc on` line: centered, without the marker.
+        let text = match text.strip_prefix(crate::attributes::CENTER) {
+            Some(rest) => {
+                self.center = true;
+                // No prose indent on a centered line.
+                if self.current.first().is_some_and(|s| s.content == "    ") {
+                    self.current.remove(0);
+                }
+                rest
+            }
+            None => text,
+        };
         // A `.pa` page break arrives as a paragraph holding only the sentinel.
         if text.trim() == crate::attributes::PAGE_BREAK.to_string() {
             self.current.push(Span::styled(
@@ -349,7 +363,12 @@ impl Renderer {
         if self.in_blockquote {
             spans.insert(0, Span::styled("│ ", Style::default().fg(Color::DarkGray)));
         }
-        self.lines.push(Line::from(spans));
+        let line = Line::from(spans);
+        self.lines.push(if std::mem::take(&mut self.center) {
+            line.alignment(ratatui::layout::Alignment::Center)
+        } else {
+            line
+        });
     }
 }
 
