@@ -140,6 +140,65 @@ pub fn clear_recovery(doc: Option<&Path>) {
     }
 }
 
+/// How many documents the recent-files list remembers.
+#[cfg(not(target_arch = "wasm32"))]
+const RECENT_MAX: usize = 12;
+
+/// The recent-documents list (`~/.local/share/wordstar-rs/recent.txt` on
+/// Linux). Not used under `cargo test`.
+#[cfg(not(target_arch = "wasm32"))]
+fn recent_list_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(dirs::data_local_dir()?.join("wordstar-rs").join("recent.txt"))
+}
+
+/// Recently edited documents, most recent first, each with the cursor position
+/// it was left at.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn recent_documents() -> Vec<(PathBuf, (usize, usize))> {
+    recent_list_file().map_or_else(Vec::new, |f| recent_documents_in(&f))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn recent_documents_in(file: &Path) -> Vec<(PathBuf, (usize, usize))> {
+    let text = fs::read_to_string(file).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let row = parts.next()?.parse().ok()?;
+            let col = parts.next()?.parse().ok()?;
+            Some((PathBuf::from(parts.next()?), (row, col)))
+        })
+        .collect()
+}
+
+/// Record `doc` as the most recently edited document, left at `pos`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remember_document(doc: &Path, pos: (usize, usize)) {
+    if let Some(file) = recent_list_file() {
+        remember_document_in(&file, doc, pos);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remember_document_in(file: &Path, doc: &Path, pos: (usize, usize)) {
+    let doc = std::path::absolute(doc).unwrap_or_else(|_| doc.to_path_buf());
+    let mut list = recent_documents_in(file);
+    list.retain(|(p, _)| *p != doc);
+    list.insert(0, (doc, pos));
+    list.truncate(RECENT_MAX);
+    let text: String = list
+        .iter()
+        .map(|(p, (r, c))| format!("{r}\t{c}\t{}\n", p.display()))
+        .collect();
+    if let Some(dir) = file.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = write_atomically(file, text.as_bytes(), None);
+}
+
 /// The personal word list (`~/.config/wordstar-rs/words.txt` on Linux): words
 /// added to the spelling dictionary, one per line. Not used under `cargo test`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -396,6 +455,28 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert!(names.iter().all(|n| !n.ends_with(".wsrs-tmp")), "temp left: {names:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_documents_keep_the_latest_first_without_duplicates() {
+        let dir = scratch("recent");
+        let list = dir.join("recent.txt");
+        remember_document_in(&list, Path::new("/novel/ch1.md"), (10, 2));
+        remember_document_in(&list, Path::new("/novel/ch2.md"), (0, 0));
+        remember_document_in(&list, Path::new("/novel/ch1.md"), (42, 7));
+        let got = recent_documents_in(&list);
+        assert_eq!(
+            got,
+            [
+                (PathBuf::from("/novel/ch1.md"), (42, 7)),
+                (PathBuf::from("/novel/ch2.md"), (0, 0))
+            ]
+        );
+        for i in 0..20 {
+            remember_document_in(&list, Path::new(&format!("/d/{i}.md")), (0, 0));
+        }
+        assert_eq!(recent_documents_in(&list).len(), RECENT_MAX);
         fs::remove_dir_all(&dir).ok();
     }
 

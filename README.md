@@ -44,6 +44,9 @@ wordstar-rs chapter1.md   # open (or create) a file
 If you start without a file name, press **F3** at any time to open the file
 browser, or just begin typing and save with **Save As** later.
 
+A document always reopens where you left off, and **File → Recent Files**
+lists the ones you've worked on lately.
+
 ---
 
 ## The screen
@@ -381,8 +384,8 @@ choose, and **Esc** to close. Pressing a menu's initial letter jumps straight to
 it. Items that open a **submenu** are marked with a `▶`; press **→** (or click)
 to open it and **←** to step back.
 
-- **File** — Open/Switch…, Close, Save, Save As…, Save and Close, Export PDF…,
-  Exit WordStar
+- **File** — Open/Switch…, Recent Files…, Close, Save, Save As…, Save and
+  Close, Save and Exit, Export PDF…, Exit WordStar
 - **Edit** — Undo · mark/copy/move/delete a block · Find…, Find and Replace…,
   Next Find, Go to Page…
 - **View** — Preview · Command Tags (show/hide markup), Block Highlighting,

@@ -65,6 +65,8 @@ pub enum Mode {
     Outline,
     /// The spelling check is asking about an unknown word.
     Spell,
+    /// File ▸ Recent Files.
+    Recent,
 }
 
 /// Which kind of single-line prompt is active.
@@ -358,6 +360,40 @@ pub struct OutlineState {
     pub selected: usize,
 }
 
+/// State backing File ▸ Recent Files ([`Mode::Recent`]).
+#[derive(Debug, Clone, Default)]
+pub struct RecentState {
+    /// Documents, most recent first, with where their cursor was left.
+    pub items: Vec<(PathBuf, (usize, usize))>,
+    pub selected: usize,
+}
+
+/// What a key or click did in a pick-list (Go to Heading, Recent Files).
+enum ListAction {
+    Stay,
+    Choose,
+    Close,
+}
+
+/// Move a pick-list selection for `key` (arrows or the WordStar diamond, page
+/// keys, Home/End) and report Enter / Esc.
+fn list_key(selected: &mut usize, len: usize, key: &KeyEvent) -> ListAction {
+    let last = len.saturating_sub(1);
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match (key.code, ctrl) {
+        (KeyCode::Up, _) | (KeyCode::Char('e'), true) => *selected = selected.saturating_sub(1),
+        (KeyCode::Down, _) | (KeyCode::Char('x'), true) => *selected = (*selected + 1).min(last),
+        (KeyCode::PageUp, _) | (KeyCode::Char('r'), true) => *selected = selected.saturating_sub(10),
+        (KeyCode::PageDown, _) | (KeyCode::Char('c'), true) => *selected = (*selected + 10).min(last),
+        (KeyCode::Home, _) => *selected = 0,
+        (KeyCode::End, _) => *selected = last,
+        (KeyCode::Enter, _) => return ListAction::Choose,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => return ListAction::Close,
+        _ => {}
+    }
+    ListAction::Stay
+}
+
 /// Positions that follow the text through edits (see [`crate::track`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Anchors {
@@ -423,6 +459,8 @@ pub struct App {
     pub calc: Option<CalcState>,
     /// The Go to Heading list (present when `mode == Outline`).
     pub outline: Option<OutlineState>,
+    /// File ▸ Recent Files (present when `mode == Recent`).
+    pub recent: Option<RecentState>,
     /// The spelling dictionary, loaded on first use (or why it couldn't be).
     speller: std::cell::OnceCell<Result<crate::spell::Speller, String>>,
     /// Underline misspelled words as you write (View menu).
@@ -565,6 +603,7 @@ impl App {
             info: None,
             calc: None,
             outline: None,
+            recent: None,
             speller: std::cell::OnceCell::new(),
             spell_highlight: true,
             spell: None,
@@ -701,6 +740,7 @@ impl App {
             Mode::ReplaceAsk => self.handle_replace_key(key),
             Mode::Outline => self.handle_outline_key(key),
             Mode::Spell => self.handle_spell_key(key),
+            Mode::Recent => self.handle_recent_key(key),
         }
     }
 
@@ -1540,6 +1580,7 @@ impl App {
         match crate::wordstar::load(&path) {
             Ok(loaded) => {
                 self.apply_loaded(loaded, path);
+                self.restore_last_position();
                 self.offer_recovery();
             }
             Err(e) => self.set_status(format!("Open failed: {e}")),
@@ -2433,22 +2474,92 @@ impl App {
             self.mode = Mode::Editor;
             return;
         };
-        let last = o.items.len() - 1;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match (key.code, ctrl) {
-            (KeyCode::Up, _) | (KeyCode::Char('e'), true) => o.selected = o.selected.saturating_sub(1),
-            (KeyCode::Down, _) | (KeyCode::Char('x'), true) => o.selected = (o.selected + 1).min(last),
-            (KeyCode::PageUp, _) | (KeyCode::Char('r'), true) => o.selected = o.selected.saturating_sub(10),
-            (KeyCode::PageDown, _) | (KeyCode::Char('c'), true) => o.selected = (o.selected + 10).min(last),
-            (KeyCode::Home, _) => o.selected = 0,
-            (KeyCode::End, _) => o.selected = last,
-            (KeyCode::Enter, _) => self.outline_jump(),
-            (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => {
-                self.outline = None;
-                self.mode = Mode::Editor;
-            }
-            _ => {}
+        match list_key(&mut o.selected, o.items.len(), &key) {
+            ListAction::Stay => {}
+            ListAction::Choose => self.outline_jump(),
+            ListAction::Close => self.close_lists(),
         }
+    }
+
+    /// Close whichever pick-list is open.
+    fn close_lists(&mut self) {
+        self.outline = None;
+        self.recent = None;
+        self.mode = Mode::Editor;
+    }
+
+    /// File ▸ Recent Files: the documents edited lately, to reopen where you
+    /// left off.
+    pub fn open_recent(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let current = self.path.as_ref().and_then(|p| std::path::absolute(p).ok());
+            let items: Vec<_> = crate::platform::recent_documents()
+                .into_iter()
+                .filter(|(p, _)| Some(p) != current.as_ref() && p.is_file())
+                .collect();
+            if items.is_empty() {
+                return self.set_status("No recent files yet.");
+            }
+            self.recent = Some(RecentState { items, selected: 0 });
+            self.mode = Mode::Recent;
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.set_status("Recent files aren't available in the browser — use Open (F3).");
+    }
+
+    fn handle_recent_key(&mut self, key: KeyEvent) {
+        let Some(r) = self.recent.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match list_key(&mut r.selected, r.items.len(), &key) {
+            ListAction::Stay => {}
+            ListAction::Choose => self.recent_open(),
+            ListAction::Close => self.close_lists(),
+        }
+    }
+
+    /// Open the selected recent document (asking about unsaved changes first).
+    fn recent_open(&mut self) {
+        let chosen = self
+            .recent
+            .take()
+            .and_then(|r| r.items.get(r.selected).map(|(p, _)| p.clone()));
+        self.mode = Mode::Editor;
+        if let Some(path) = chosen {
+            self.guard_unsaved(AfterSave::Open(path));
+        }
+    }
+
+    /// Record where the cursor is in the current document, for Recent Files and
+    /// for reopening it at the same place.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_position(&self) {
+        if let Some(path) = &self.path {
+            crate::platform::remember_document(path, self.cursor_pos());
+        }
+    }
+
+    /// After opening a document, go back to where it was left last time.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore_last_position(&mut self) {
+        let Some(path) = self.path.as_ref().and_then(|p| std::path::absolute(p).ok()) else {
+            return;
+        };
+        let last = crate::platform::recent_documents()
+            .into_iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, pos)| pos);
+        if let Some(pos) = last.filter(|&p| p != (0, 0)) {
+            self.textarea.move_cursor(jump(pos));
+            let message = match self.status_msg.take() {
+                Some(opened) => format!("{opened} — back where you left off."),
+                None => "Back where you left off.".to_string(),
+            };
+            self.set_status(message);
+        }
+        self.note_position();
     }
 
     /// Jump to the selected heading and close the list.
@@ -3196,6 +3307,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         match crate::platform::write_file_safely(path, content.as_bytes()) {
             Ok(backup_error) => {
+                crate::platform::remember_document(path, self.cursor_pos());
                 crate::platform::clear_recovery(self.path.as_deref());
                 crate::platform::clear_recovery(Some(path));
                 self.autosave_hash = None;
@@ -3239,6 +3351,8 @@ impl App {
     fn run_after(&mut self, after: AfterSave) {
         #[cfg(not(target_arch = "wasm32"))]
         if after != AfterSave::Nothing {
+            // Leaving this document: remember where we were in it.
+            self.note_position();
             crate::platform::clear_recovery(self.path.as_deref());
         }
         match after {
@@ -3505,7 +3619,7 @@ impl App {
                     self.mode = Mode::Editor;
                 }
             }
-            Mode::Outline => self.mouse_outline(me),
+            Mode::Outline | Mode::Recent => self.mouse_list(me),
             Mode::Spell => {}
             Mode::Prompt
             | Mode::Confirm
@@ -3743,31 +3857,41 @@ impl App {
 
     /// Mouse in the Go to Heading list: the wheel moves the selection, a click
     /// jumps to that heading, a click outside closes the list.
-    fn mouse_outline(&mut self, me: MouseEvent) {
+    fn mouse_list(&mut self, me: MouseEvent) {
         let area = self.outline_area.get();
-        let Some(o) = self.outline.as_mut() else {
-            return;
+        let (selected, len) = match self.mode {
+            Mode::Outline => match self.outline.as_mut() {
+                Some(o) => (&mut o.selected, o.items.len()),
+                None => return,
+            },
+            _ => match self.recent.as_mut() {
+                Some(r) => (&mut r.selected, r.items.len()),
+                None => return,
+            },
         };
-        let last = o.items.len() - 1;
+        let last = len.saturating_sub(1);
         match me.kind {
-            MouseEventKind::ScrollDown => o.selected = (o.selected + 1).min(last),
-            MouseEventKind::ScrollUp => o.selected = o.selected.saturating_sub(1),
+            MouseEventKind::ScrollDown => *selected = (*selected + 1).min(last),
+            MouseEventKind::ScrollUp => *selected = selected.saturating_sub(1),
             MouseEventKind::Down(MouseButton::Left) => {
                 let inside = me.row >= area.y
                     && me.row < area.y + area.height
                     && me.column >= area.x
                     && me.column < area.x + area.width;
                 if !inside {
-                    self.outline = None;
-                    self.mode = Mode::Editor;
+                    self.close_lists();
                     return;
                 }
                 // The list scrolls to keep the selection in view; see the renderer.
-                let first = crate::ui::outline_first_row(o.selected, area.height as usize);
+                let first = crate::ui::outline_first_row(*selected, area.height as usize);
                 let idx = first + (me.row - area.y) as usize;
                 if idx <= last {
-                    o.selected = idx;
-                    self.outline_jump();
+                    *selected = idx;
+                    if self.mode == Mode::Outline {
+                        self.outline_jump();
+                    } else {
+                        self.recent_open();
+                    }
                 }
             }
             _ => {}
@@ -4852,6 +4976,26 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Confirm);
         app.handle_key(key(KeyCode::Char('n')));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recent_files_list_opens_the_chosen_document() {
+        let dir = scratch("recent-list");
+        let (a, b) = (dir.join("a.md"), dir.join("b.md"));
+        std::fs::write(&a, "Chapter A\n").unwrap();
+        std::fs::write(&b, "Chapter B\n").unwrap();
+        let mut app = App::new(None).unwrap();
+        app.recent = Some(RecentState {
+            items: vec![(a.clone(), (0, 0)), (b.clone(), (0, 3))],
+            selected: 0,
+        });
+        app.mode = Mode::Recent;
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.path.as_deref(), Some(b.as_path()));
+        assert_eq!(app.textarea.lines(), ["Chapter B"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

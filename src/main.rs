@@ -24,7 +24,9 @@ fn main() -> Result<()> {
     let path = std::env::args().nth(1);
     let mut terminal = ratatui::init();
     let mut app = App::new(path)?;
-    // A crash or a closed terminal may have left autosaved work behind.
+    // Reopen where the document was left, and offer back any autosaved work a
+    // crash or a closed terminal left behind.
+    app.restore_last_position();
     app.offer_recovery();
     // Detect terminal graphics support before enabling mouse capture, so the
     // protocol query/response isn't disturbed by mouse reports. The query blocks

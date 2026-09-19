@@ -65,6 +65,7 @@ const SEP: MenuItem = MenuItem {
 
 static FILE: &[MenuItem] = &[
     item("Open/Switch...", "^OK / F3", Command::OpenBrowser),
+    item("Recent Files...", "", Command::RecentFiles),
     item("Close", "", Command::New),
     SEP,
     item("Save", "^KS / F2", Command::Save),

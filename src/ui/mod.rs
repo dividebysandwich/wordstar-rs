@@ -71,6 +71,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         // The question is on the status line; the match stays in view.
         Mode::ReplaceAsk => {}
         Mode::Outline => outline_overlay(frame, area, app),
+        Mode::Recent => recent_overlay(frame, area, app),
         Mode::Spell => spell_overlay(frame, rows[4], app),
     }
 }
@@ -532,30 +533,62 @@ pub fn outline_first_row(selected: usize, height: usize) -> usize {
 
 /// The Go to Heading list: each heading indented by level, with its page.
 fn outline_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    const HINT: &str = " ↑↓ select · Enter go · Esc close ";
     let Some(o) = app.outline.as_ref() else {
         return;
     };
-    let entry = |h: &crate::app::OutlineItem| {
-        (format!("{}{}", "  ".repeat(h.level - 1), h.title), format!("p. {}", h.page))
-    };
-    let widest = o
+    let entries: Vec<(String, String)> = o
         .items
         .iter()
-        .map(|h| {
-            let (t, p) = entry(h);
-            t.chars().count() + p.chars().count() + 3
+        .map(|h| (format!("{}{}", "  ".repeat(h.level - 1), h.title), format!("p. {}", h.page)))
+        .collect();
+    list_overlay(frame, area, app, " Go to Heading ", &entries, o.selected);
+}
+
+/// File ▸ Recent Files: each document's name, and the folder it's in.
+fn recent_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(r) = app.recent.as_ref() else {
+        return;
+    };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let entries: Vec<(String, String)> = r
+        .items
+        .iter()
+        .map(|(path, _)| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let mut dir = path.parent().map(|d| d.display().to_string()).unwrap_or_default();
+            if !home.is_empty() && dir.starts_with(&home) {
+                dir = format!("~{}", &dir[home.len()..]);
+            }
+            (name, dir)
         })
+        .collect();
+    list_overlay(frame, area, app, " Recent Files ", &entries, r.selected);
+}
+
+/// A centered pick-list: `(label, detail)` rows, the detail right-aligned, with
+/// the `selected` row highlighted and kept in view.
+fn list_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    title: &str,
+    entries: &[(String, String)],
+    selected: usize,
+) {
+    const HINT: &str = " ↑↓ select · Enter go · Esc close ";
+    let widest = entries
+        .iter()
+        .map(|(t, d)| t.chars().count() + d.chars().count() + 3)
         .max()
         .unwrap_or(20)
         .max(HINT.chars().count());
     let width = (widest + 4).min(area.width as usize) as u16;
-    let height = (o.items.len() + 2).min(area.height.saturating_sub(4) as usize).max(3) as u16;
+    let height = (entries.len() + 2).min(area.height.saturating_sub(4) as usize).max(3) as u16;
     let rect = centered(area, width, height);
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Go to Heading ")
+        .title(title)
         .title_bottom(HINT)
         .style(theme::menu_panel());
     let inner = block.inner(rect);
@@ -567,24 +600,33 @@ fn outline_overlay(frame: &mut Frame, area: Rect, app: &App) {
     };
     app.outline_area.set(list);
 
-    let first = outline_first_row(o.selected, list.height as usize);
-    let lines: Vec<Line> = o
-        .items
+    let first = outline_first_row(selected, list.height as usize);
+    let lines: Vec<Line> = entries
         .iter()
         .enumerate()
         .skip(first)
         .take(list.height as usize)
-        .map(|(i, h)| {
-            let (title, page) = entry(h);
-            let room = (list.width as usize).saturating_sub(page.chars().count() + 1);
-            let title: String = title.chars().take(room).collect();
-            let gap = (list.width as usize).saturating_sub(title.chars().count() + page.chars().count());
-            let style = if i == o.selected {
+        .map(|(i, (label, detail))| {
+            // The label comes first; a long detail (a folder path) gives way,
+            // keeping its end.
+            let width = list.width as usize;
+            let label: String = label.chars().take(width).collect();
+            let room = width.saturating_sub(label.chars().count() + 2);
+            let len = detail.chars().count();
+            let detail: String = if len <= room {
+                detail.clone()
+            } else if room > 1 {
+                std::iter::once('…').chain(detail.chars().skip(len - room + 1)).collect()
+            } else {
+                String::new()
+            };
+            let gap = width.saturating_sub(label.chars().count() + detail.chars().count());
+            let style = if i == selected {
                 theme::menu_panel_selected()
             } else {
                 theme::menu_panel()
             };
-            Line::from(Span::styled(format!("{title}{}{page}", " ".repeat(gap)), style))
+            Line::from(Span::styled(format!("{label}{}{detail}", " ".repeat(gap)), style))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).style(theme::menu_panel()), list);
