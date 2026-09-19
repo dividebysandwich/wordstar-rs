@@ -139,6 +139,8 @@ pub enum Command {
     /// Set / go to place marker 0–9 (^K0–^K9 / ^Q0–^Q9).
     SetMarker(usize),
     GotoMarker(usize),
+    /// List the headings (chapters) to jump to (^QG).
+    GotoHeading,
     /// Ask which marker to set / go to (Edit menu).
     SetMarkerPrompt,
     GotoMarkerPrompt,
@@ -259,6 +261,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         PreviousPosition => app.goto_previous_position(),
         SetMarker(n) => app.set_marker(n),
         GotoMarker(n) => app.goto_marker(n),
+        GotoHeading => app.open_outline(),
         SetMarkerPrompt => app.start_marker_prompt(true),
         GotoMarkerPrompt => app.start_marker_prompt(false),
 

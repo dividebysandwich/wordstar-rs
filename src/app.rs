@@ -61,6 +61,8 @@ pub enum Mode {
     Calculator,
     /// Find and replace is asking whether to replace the highlighted match.
     ReplaceAsk,
+    /// The Go to Heading list.
+    Outline,
 }
 
 /// Which kind of single-line prompt is active.
@@ -281,6 +283,25 @@ pub struct LastFind {
     pub options: FindOptions,
 }
 
+/// One heading in the Go to Heading list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineItem {
+    /// Document row of the heading.
+    pub row: usize,
+    /// Heading level, 1 for `#`.
+    pub level: usize,
+    pub title: String,
+    /// Printed page it falls on.
+    pub page: usize,
+}
+
+/// State backing the Go to Heading list ([`Mode::Outline`]).
+#[derive(Debug, Clone, Default)]
+pub struct OutlineState {
+    pub items: Vec<OutlineItem>,
+    pub selected: usize,
+}
+
 /// Positions that follow the text through edits (see [`crate::track`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Anchors {
@@ -344,6 +365,10 @@ pub struct App {
     pub info: Option<InfoState>,
     /// Active calculator dialog (present when `mode == Calculator`).
     pub calc: Option<CalcState>,
+    /// The Go to Heading list (present when `mode == Outline`).
+    pub outline: Option<OutlineState>,
+    /// Geometry of the Go to Heading list's rows, for mouse hit-testing.
+    pub outline_area: Cell<Rect>,
     /// Active header/footer dialog (present when `mode == Header`).
     pub header_dialog: Option<HeaderState>,
     /// Active file browser (present when `mode == Browser`). Native only — the
@@ -477,6 +502,8 @@ impl App {
             confirm: None,
             info: None,
             calc: None,
+            outline: None,
+            outline_area: Cell::new(Rect::ZERO),
             header_dialog: None,
             #[cfg(not(target_arch = "wasm32"))]
             browser: None,
@@ -605,6 +632,7 @@ impl App {
             Mode::Header => self.handle_header_key(key),
             Mode::Calculator => self.handle_calc_key(key),
             Mode::ReplaceAsk => self.handle_replace_key(key),
+            Mode::Outline => self.handle_outline_key(key),
         }
     }
 
@@ -2061,6 +2089,94 @@ impl App {
         }
     }
 
+    /// The document's headings (`#` … `######` outside code blocks and the
+    /// frontmatter; a lone `#` is a scene break, not a heading), with the page
+    /// each falls on.
+    pub fn headings(&self) -> Vec<OutlineItem> {
+        let lines = self.textarea.lines();
+        let rows = self.visual_rows.borrow();
+        let pages = self.row_pages.borrow();
+        let mut body_start = 0;
+        if lines.first().map(|l| l.trim()) == Some("---")
+            && let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---")
+        {
+            body_start = end + 2;
+        }
+        let mut in_fence = false;
+        let mut out = Vec::new();
+        for (row, line) in lines.iter().enumerate().skip(body_start) {
+            let t = line.trim_start();
+            if t.starts_with("```") || t.starts_with("~~~") {
+                in_fence = !in_fence;
+                continue;
+            }
+            let level = t.chars().take_while(|&c| c == '#').count();
+            if in_fence || !(1..=6).contains(&level) || !t[level..].starts_with(' ') {
+                continue;
+            }
+            let title = crate::attributes::strip_inline_markers(t[level..].trim());
+            let title = title.trim_end_matches('#').trim().to_string();
+            if title.is_empty() {
+                continue;
+            }
+            let first_row = rows.partition_point(|r| r.line < row);
+            let page = pages.get(first_row).map_or(row / LINES_PER_PAGE + 1, |p| p.0);
+            out.push(OutlineItem { row, level, title, page });
+        }
+        out
+    }
+
+    /// Go to Heading (`^QG`): list the chapters and headings to jump to, with
+    /// the one the cursor is in selected.
+    pub fn open_outline(&mut self) {
+        let items = self.headings();
+        if items.is_empty() {
+            self.set_status("No headings yet — a line starting with \"# \" is a chapter title.");
+            return;
+        }
+        let row = self.cursor_pos().0;
+        let selected = items.iter().rposition(|h| h.row <= row).unwrap_or(0);
+        self.outline = Some(OutlineState { items, selected });
+        self.mode = Mode::Outline;
+    }
+
+    fn handle_outline_key(&mut self, key: KeyEvent) {
+        let Some(o) = self.outline.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        let last = o.items.len() - 1;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (key.code, ctrl) {
+            (KeyCode::Up, _) | (KeyCode::Char('e'), true) => o.selected = o.selected.saturating_sub(1),
+            (KeyCode::Down, _) | (KeyCode::Char('x'), true) => o.selected = (o.selected + 1).min(last),
+            (KeyCode::PageUp, _) | (KeyCode::Char('r'), true) => o.selected = o.selected.saturating_sub(10),
+            (KeyCode::PageDown, _) | (KeyCode::Char('c'), true) => o.selected = (o.selected + 10).min(last),
+            (KeyCode::Home, _) => o.selected = 0,
+            (KeyCode::End, _) => o.selected = last,
+            (KeyCode::Enter, _) => self.outline_jump(),
+            (KeyCode::Esc, _) | (KeyCode::Char('q'), false) => {
+                self.outline = None;
+                self.mode = Mode::Editor;
+            }
+            _ => {}
+        }
+    }
+
+    /// Jump to the selected heading and close the list.
+    fn outline_jump(&mut self) {
+        let Some(o) = self.outline.take() else {
+            return;
+        };
+        self.mode = Mode::Editor;
+        if let Some(item) = o.items.get(o.selected) {
+            self.remember_position();
+            self.clear_marking();
+            self.textarea.move_cursor(jump((item.row, 0)));
+            self.set_status(format!("{} — page {}.  ^QP goes back.", item.title, item.page));
+        }
+    }
+
     /// `^K0`…`^K9` — set place marker `n` at the cursor (again, on the same
     /// spot, removes it).
     pub fn set_marker(&mut self, n: usize) {
@@ -3016,6 +3132,7 @@ impl App {
                     self.mode = Mode::Editor;
                 }
             }
+            Mode::Outline => self.mouse_outline(me),
             Mode::Prompt
             | Mode::Confirm
             | Mode::Header
@@ -3248,6 +3365,39 @@ impl App {
     pub fn scroll_viewport(&self, rows: isize) {
         let top = self.scroll_top.get() as isize;
         self.scroll_top.set((top + rows).max(0) as usize);
+    }
+
+    /// Mouse in the Go to Heading list: the wheel moves the selection, a click
+    /// jumps to that heading, a click outside closes the list.
+    fn mouse_outline(&mut self, me: MouseEvent) {
+        let area = self.outline_area.get();
+        let Some(o) = self.outline.as_mut() else {
+            return;
+        };
+        let last = o.items.len() - 1;
+        match me.kind {
+            MouseEventKind::ScrollDown => o.selected = (o.selected + 1).min(last),
+            MouseEventKind::ScrollUp => o.selected = o.selected.saturating_sub(1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let inside = me.row >= area.y
+                    && me.row < area.y + area.height
+                    && me.column >= area.x
+                    && me.column < area.x + area.width;
+                if !inside {
+                    self.outline = None;
+                    self.mode = Mode::Editor;
+                    return;
+                }
+                // The list scrolls to keep the selection in view; see the renderer.
+                let first = crate::ui::outline_first_row(o.selected, area.height as usize);
+                let idx = first + (me.row - area.y) as usize;
+                if idx <= last {
+                    o.selected = idx;
+                    self.outline_jump();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Map a click in the editor pane to a document `(row, col)` through the
@@ -4204,6 +4354,41 @@ mod tests {
         assert_eq!(app.markers[3], None);
         chord(&mut app, 'q', '3');
         assert!(app.status_msg.as_deref().unwrap().contains("not set"));
+    }
+
+    /// A small novel: frontmatter, two chapters, a scene, a code block and a
+    /// scene break that must not count as headings.
+    const NOVEL: &str = "---\ntitle: # not a heading\n---\n# Chapter **One**\nText.\n#\n## The Storm\n```\n# code, not a heading\n```\n.pa\n# Chapter Two #\nMore.";
+
+    #[test]
+    fn headings_skip_frontmatter_code_and_scene_breaks() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str(NOVEL);
+        let h = app.headings();
+        let titles: Vec<(usize, &str)> = h.iter().map(|h| (h.level, h.title.as_str())).collect();
+        assert_eq!(titles, [(1, "Chapter One"), (2, "The Storm"), (1, "Chapter Two")]);
+        assert_eq!(h[0].row, 3);
+    }
+
+    #[test]
+    fn go_to_heading_jumps_and_ctrl_qp_comes_back() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str(NOVEL);
+        app.textarea.move_cursor(CursorMove::Jump(7, 1)); // in "The Storm"
+        chord(&mut app, 'q', 'g');
+        assert_eq!(app.mode, Mode::Outline);
+        assert_eq!(app.outline.as_ref().unwrap().selected, 1, "current heading selected");
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.cursor(), (11, 0));
+        chord(&mut app, 'q', 'p');
+        assert_eq!(app.textarea.cursor(), (7, 1));
+        // Without headings there is nothing to list.
+        let mut empty = App::new(None).unwrap();
+        empty.textarea.insert_str("Just prose.");
+        empty.open_outline();
+        assert_eq!(empty.mode, Mode::Editor);
     }
 
     #[test]

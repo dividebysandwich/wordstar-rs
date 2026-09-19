@@ -70,6 +70,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Calculator => calc_overlay(frame, area, app),
         // The question is on the status line; the match stays in view.
         Mode::ReplaceAsk => {}
+        Mode::Outline => outline_overlay(frame, area, app),
     }
 }
 
@@ -408,6 +409,72 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// A centered, dismissable information modal (e.g. Word Count).
+/// The first list row shown in the Go to Heading list, scrolled so that the
+/// selected entry stays in view (`height` rows fit).
+pub fn outline_first_row(selected: usize, height: usize) -> usize {
+    (selected + 1).saturating_sub(height.max(1))
+}
+
+/// The Go to Heading list: each heading indented by level, with its page.
+fn outline_overlay(frame: &mut Frame, area: Rect, app: &App) {
+    const HINT: &str = " ↑↓ select · Enter go · Esc close ";
+    let Some(o) = app.outline.as_ref() else {
+        return;
+    };
+    let entry = |h: &crate::app::OutlineItem| {
+        (format!("{}{}", "  ".repeat(h.level - 1), h.title), format!("p. {}", h.page))
+    };
+    let widest = o
+        .items
+        .iter()
+        .map(|h| {
+            let (t, p) = entry(h);
+            t.chars().count() + p.chars().count() + 3
+        })
+        .max()
+        .unwrap_or(20)
+        .max(HINT.chars().count());
+    let width = (widest + 4).min(area.width as usize) as u16;
+    let height = (o.items.len() + 2).min(area.height.saturating_sub(4) as usize).max(3) as u16;
+    let rect = centered(area, width, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Go to Heading ")
+        .title_bottom(HINT)
+        .style(theme::menu_panel());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let list = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    app.outline_area.set(list);
+
+    let first = outline_first_row(o.selected, list.height as usize);
+    let lines: Vec<Line> = o
+        .items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(list.height as usize)
+        .map(|(i, h)| {
+            let (title, page) = entry(h);
+            let room = (list.width as usize).saturating_sub(page.chars().count() + 1);
+            let title: String = title.chars().take(room).collect();
+            let gap = (list.width as usize).saturating_sub(title.chars().count() + page.chars().count());
+            let style = if i == o.selected {
+                theme::menu_panel_selected()
+            } else {
+                theme::menu_panel()
+            };
+            Line::from(Span::styled(format!("{title}{}{page}", " ".repeat(gap)), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).style(theme::menu_panel()), list);
+}
+
 fn info_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let Some(info) = app.info.as_ref() else {
         return;
@@ -1440,6 +1507,25 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let m = app.cursor_metrics();
         assert_eq!((m.page, m.line), (2, 1));
+    }
+
+    #[test]
+    fn go_to_heading_lists_titles_with_pages() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("# One\ntext\n.pa\n## Two\nmore");
+        rendered(&app, 80, 24); // lay the pages out
+        app.open_outline();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let screen: String = (0..24)
+            .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("Go to Heading"), "{screen}");
+        let entry = |t: &str| screen.lines().find(|l| l.contains(t) && l.contains("p. ")).unwrap().to_string();
+        assert!(entry("One").contains("p. 1"), "{screen}");
+        let two = entry("Two");
+        assert!(two.contains("  Two") && two.contains("p. 2"), "indented, page 2: {two}");
     }
 
     #[test]

@@ -91,6 +91,7 @@ static EDIT: &[MenuItem] = &[
     item("Find and Replace...", "^QA", Command::Replace),
     item("Next Find", "^L", Command::FindNext),
     item("Go to Page...", "^QI", Command::GoToPage),
+    item("Go to Heading...", "^QG", Command::GotoHeading),
     item("Previous Position", "^QP", Command::PreviousPosition),
     item("Set Marker...", "^K0-9", Command::SetMarkerPrompt),
     item("Go to Marker...", "^Q0-9", Command::GotoMarkerPrompt),

@@ -191,6 +191,7 @@ here, and the function keys are added for convenience.
 | `^Q` `^S` / `^Q` `^D` | Start / End of line   |
 | `^Q` `^R` / `^Q` `^C` | Start / End of document |
 | `^Q` `^I`   | Go to page                      |
+| `^Q` `^G`   | Go to heading — a list of your chapters (`#` lines) and their pages |
 | `^Q` `^B` / `^Q` `^K` | Beginning / End of the marked block |
 | `^K` `0`…`9` | Set place marker 0–9 at the cursor (again on the same spot removes it) |
 | `^Q` `0`…`9` | Go to place marker 0–9 |
