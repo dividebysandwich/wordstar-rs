@@ -226,6 +226,8 @@ or moved there.
 | `^KV` | Move the marked block to the cursor — or, with no block marked, paste the block buffer |
 | `^KY` | Delete the block (it stays in the buffer, so `^KV` pastes it back) |
 | `^KH` | Hide / redisplay the block      |
+| `^KW` | Write the block to a file (e.g. to keep a scene you're cutting) |
+| `^K"` / `^K'` / `^K.` | Block to UPPER case / lower case / Sentence case |
 
 Bold, italic, and the other **Style** commands apply to the marked block too.
 The block stays attached to its text while you keep writing: typing before it

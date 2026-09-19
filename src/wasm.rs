@@ -231,6 +231,15 @@ fn install_input_handlers(
             MouseEventKind::Moved
         })
     })?;
+    // The wheel scrolls the document, lists and previews, as in a terminal.
+    install_mouse(window, app, "wheel", |ev| {
+        let delta = ev.dyn_ref::<web_sys::WheelEvent>()?.delta_y();
+        match delta {
+            d if d > 0.0 => Some(MouseEventKind::ScrollDown),
+            d if d < 0.0 => Some(MouseEventKind::ScrollUp),
+            _ => None,
+        }
+    })?;
     Ok(())
 }
 

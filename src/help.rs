@@ -109,6 +109,8 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "", "(no block: paste the block buffer)");
     row(&mut out, "^KY", "Delete block (kept in the buffer)");
     row(&mut out, "^KH", "Hide / redisplay the block");
+    row(&mut out, "^KW", "Write the block to a file");
+    row(&mut out, "^K\" ^K' ^K.", "Block to UPPER / lower / Sentence case");
 
     head(&mut out, "Formatting (markdown)");
     row(&mut out, "^PB", "Bold  (**…**)");

@@ -68,6 +68,7 @@ features = [
     "ClipboardEvent",
     "DataTransfer",
     "MouseEvent",
+    "WheelEvent",
     "FontFaceSet",
     "HtmlElement",
     "Storage",

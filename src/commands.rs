@@ -146,6 +146,10 @@ pub enum Command {
     SpellWord,
     /// Underline misspelled words as you write (View menu).
     ToggleSpellHighlight,
+    /// Write the marked block to a file (^KW).
+    WriteBlock,
+    /// Change the case of the marked block (^K" upper, ^K' lower, ^K. sentence).
+    ChangeCase(crate::app::Case),
     /// Ask which marker to set / go to (Edit menu).
     SetMarkerPrompt,
     GotoMarkerPrompt,
@@ -270,6 +274,8 @@ pub fn execute(app: &mut App, cmd: Command) {
         SpellCheck => app.start_spell_check(),
         SpellWord => app.spell_check_word(),
         ToggleSpellHighlight => app.toggle_spell_highlight(),
+        WriteBlock => app.start_write_block(),
+        ChangeCase(case) => app.change_case(case),
         SetMarkerPrompt => app.start_marker_prompt(true),
         GotoMarkerPrompt => app.start_marker_prompt(false),
 

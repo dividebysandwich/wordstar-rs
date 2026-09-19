@@ -19,17 +19,21 @@ use std::time::SystemTime;
 /// goes to a temporary file in the same directory, is flushed to disk, and only
 /// then renamed over the target. The previous version, if any, is kept as
 /// `<name>.bak` (WordStar's backup file); failing to write the backup never
-/// blocks the save itself. A symlinked document is written through to its target.
+/// blocks the save itself, but is returned (`Ok(Some(error))`) so it can be
+/// reported. A symlinked document is written through to its target.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn write_file_safely(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_file_safely(path: &Path, bytes: &[u8]) -> io::Result<Option<io::Error>> {
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = fs::metadata(&path).ok();
+    let mut backup_error = None;
     if let Some(meta) = &existing
         && meta.is_file()
+        && let Err(e) = fs::copy(&path, backup_path(&path))
     {
-        let _ = fs::copy(&path, backup_path(&path));
+        backup_error = Some(e);
     }
-    write_atomically(&path, bytes, existing.map(|m| m.permissions()))
+    write_atomically(&path, bytes, existing.map(|m| m.permissions()))?;
+    Ok(backup_error)
 }
 
 /// The WordStar-style backup file for `path`: `chapter.md` → `chapter.md.bak`.
@@ -382,9 +386,9 @@ mod tests {
     fn safe_write_keeps_backup_and_leaves_no_temp_file() {
         let dir = scratch("safe-write");
         let doc = dir.join("story.md");
-        write_file_safely(&doc, b"first draft\n").unwrap();
+        assert!(write_file_safely(&doc, b"first draft\n").unwrap().is_none());
         assert!(!backup_path(&doc).exists(), "no backup for a brand-new file");
-        write_file_safely(&doc, b"second draft\n").unwrap();
+        assert!(write_file_safely(&doc, b"second draft\n").unwrap().is_none());
         assert_eq!(fs::read_to_string(&doc).unwrap(), "second draft\n");
         assert_eq!(fs::read_to_string(backup_path(&doc)).unwrap(), "first draft\n");
         let names: Vec<String> = fs::read_dir(&dir)

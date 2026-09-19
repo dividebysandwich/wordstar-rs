@@ -93,6 +93,8 @@ pub enum PromptKind {
     GotoMarker,
     /// A replacement typed during the spelling check.
     SpellReplace,
+    /// Where to write the marked block (^KW).
+    WriteBlock,
 }
 
 /// Header vs. footer for the [`Mode::Header`] dialog.
@@ -162,6 +164,8 @@ pub enum ConfirmAction {
     SaveBefore(AfterSave),
     /// Restore this autosaved recovery text in place of the loaded document.
     Recover(String),
+    /// Write this block text over an existing file (^KW).
+    OverwriteBlock(PathBuf, String),
 }
 
 /// Identifies a zoomed preview view: `(page, zoom×1000, offx×1000, offy×1000,
@@ -285,6 +289,38 @@ pub struct LastFind {
     pub find: String,
     pub replace: Option<String>,
     pub options: FindOptions,
+}
+
+/// Case changes for a block (`^K"`, `^K'`, `^K.`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    Upper,
+    Lower,
+    Sentence,
+}
+
+/// Sentence case: lower case, with a capital at the start and after each `.`,
+/// `!` or `?` — and the word "I" (and I'm, I'd, …) kept upright.
+fn sentence_case(text: &str) -> String {
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut capital = true;
+    for (i, &c) in lower.iter().enumerate() {
+        let alone_i = c == 'i'
+            && !lower.get(i.wrapping_sub(1)).is_some_and(|p| i > 0 && p.is_alphanumeric())
+            && !lower.get(i + 1).is_some_and(|n| n.is_alphanumeric());
+        if c.is_alphabetic() && (capital || alone_i) {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+        if c.is_alphanumeric() {
+            capital = false;
+        } else if matches!(c, '.' | '!' | '?') {
+            capital = true;
+        }
+    }
+    out
 }
 
 /// An unknown word found by the spelling check: its start, end and text.
@@ -1060,6 +1096,26 @@ impl App {
                 let name = self.prompt.input.clone();
                 self.mode = Mode::Editor;
                 self.insert_file(&name);
+            }
+            PromptKind::WriteBlock => {
+                let name = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                let Some(text) = self.block_text() else {
+                    return self.set_status("The block is gone — mark it again.");
+                };
+                if name.is_empty() {
+                    return self.set_status("Write cancelled (no name).");
+                }
+                let path = self.resolve_save_path(&name);
+                if path.exists() {
+                    self.confirm = Some(ConfirmState {
+                        message: format!("{} already exists. Overwrite?", path.display()),
+                        action: ConfirmAction::OverwriteBlock(path, text),
+                    });
+                    self.mode = Mode::Confirm;
+                } else {
+                    self.write_block(&path, &text);
+                }
             }
             PromptKind::SpellReplace => {
                 let with = self.prompt.input.clone();
@@ -2470,6 +2526,84 @@ impl App {
         (c.0, c.1)
     }
 
+    /// The text of the live selection, or else of the displayed marked block.
+    fn block_text(&self) -> Option<String> {
+        self.selected_text()
+            .or_else(|| self.visible_block().map(|b| b.text.clone()))
+    }
+
+    /// `^KW` — write the marked block to a file (e.g. to keep a cut scene).
+    pub fn start_write_block(&mut self) {
+        if self.block_text().is_none() {
+            return self.set_status("Mark a block first — ^KB, move, ^KK.");
+        }
+        self.open_prompt(PromptKind::WriteBlock, "Write block to file:", String::new());
+    }
+
+    fn write_block(&mut self, path: &Path, text: &str) {
+        let mut content = text.to_string();
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crate::platform::write_file_safely(path, content.as_bytes()) {
+            Ok(_) => self.set_status(format!("Block written to {}.", path.display())),
+            Err(e) => self.set_status(format!("Could not write {}: {e}", path.display())),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = file_download_name(path, "md");
+            match crate::platform::download(&name, "text/markdown", content.as_bytes()) {
+                Ok(()) => self.set_status(format!("Downloaded {name}")),
+                Err(e) => self.set_status(e),
+            }
+        }
+    }
+
+    /// `^K"` / `^K'` / `^K.` — change the case of the marked block (or the
+    /// selection) to UPPER, lower or Sentence case.
+    pub fn change_case(&mut self, case: Case) {
+        let selection = self.textarea.selection_range().filter(|(s, e)| s != e);
+        let (start, end, from_block) = match (selection, self.visible_block()) {
+            (Some((s, e)), _) => (s, e, false),
+            (None, Some(b)) => (b.start, b.end, true),
+            (None, None) => return self.set_status("Mark a block first — ^KB, move, ^KK."),
+        };
+        let Some(text) = self.text_between(start, end) else {
+            return;
+        };
+        let changed = match case {
+            Case::Upper => text.to_uppercase(),
+            Case::Lower => text.to_lowercase(),
+            Case::Sentence => sentence_case(&text),
+        };
+        self.marking = false;
+        if changed != text {
+            self.textarea.cancel_selection();
+            self.textarea.move_cursor(jump(start));
+            self.textarea.start_selection();
+            self.textarea.move_cursor(jump(end));
+            self.textarea.insert_str(&changed);
+            self.modified = true;
+        }
+        let end = self.cursor_pos();
+        self.textarea.cancel_selection();
+        if from_block {
+            // The block still covers the (possibly longer: ß → SS) text.
+            self.marked = Some(MarkedBlock {
+                start,
+                end,
+                text: changed,
+                hidden: false,
+            });
+        }
+        self.set_status(match case {
+            Case::Upper => "Block in UPPER CASE.",
+            Case::Lower => "Block in lower case.",
+            Case::Sentence => "Block in Sentence case.",
+        });
+    }
+
     /// The currently selected text, if any (used for block copy/cut).
     fn selected_text(&self) -> Option<String> {
         let (start, end) = self.textarea.selection_range()?;
@@ -3061,12 +3195,18 @@ impl App {
         content.push('\n');
         #[cfg(not(target_arch = "wasm32"))]
         match crate::platform::write_file_safely(path, content.as_bytes()) {
-            Ok(()) => {
+            Ok(backup_error) => {
                 crate::platform::clear_recovery(self.path.as_deref());
                 crate::platform::clear_recovery(Some(path));
                 self.autosave_hash = None;
                 self.modified = false;
-                self.set_status(format!("Saved {}", path.display()));
+                match backup_error {
+                    None => self.set_status(format!("Saved {}", path.display())),
+                    Some(e) => self.set_status(format!(
+                        "Saved {} — but the .bak backup could not be written: {e}",
+                        path.display()
+                    )),
+                }
                 true
             }
             Err(e) => {
@@ -3269,6 +3409,7 @@ impl App {
                     Some(ConfirmAction::OverwritePdf(path)) => self.do_export_pdf(&path),
                     Some(ConfirmAction::OverwriteSave(path)) => self.save_as(path),
                     Some(ConfirmAction::Recover(text)) => self.restore_recovered(&text),
+                    Some(ConfirmAction::OverwriteBlock(path, text)) => self.write_block(&path, &text),
                     _ => {}
                 }
             }
@@ -4667,6 +4808,51 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.textarea.lines(), ["A fine day."]);
         assert_eq!(app.mode, Mode::Editor, "one word only");
+    }
+
+    #[test]
+    fn sentence_case_capitalises_sentences_and_i() {
+        assert_eq!(
+            sentence_case("tHE STORM. i think i'm lost! yes? IT is iron"),
+            "The storm. I think I'm lost! Yes? It is iron"
+        );
+    }
+
+    #[test]
+    fn case_commands_change_the_marked_block() {
+        let mut app = marked_quick(); // "quick " in "The quick brown fox."
+        app.textarea.move_cursor(CursorMove::End);
+        app.handle_key(ctrl('k'));
+        app.handle_key(key(KeyCode::Char('"')));
+        assert_eq!(app.textarea.lines(), ["The QUICK brown fox."]);
+        assert_eq!(app.marked.as_ref().unwrap().text, "QUICK ", "still marked");
+        chord(&mut app, 'k', '\'');
+        assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+        // No block: nothing changes.
+        chord(&mut app, 'k', 'h'); // hide it
+        chord(&mut app, 'k', '"');
+        assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+        assert!(app.status_msg.as_deref().unwrap().contains("Mark a block"));
+    }
+
+    #[test]
+    fn ctrl_kw_writes_the_block_to_a_file() {
+        let dir = scratch("write-block");
+        let mut app = marked_quick();
+        app.path = Some(dir.join("novel.md"));
+        chord(&mut app, 'k', 'w');
+        assert_eq!(app.mode, Mode::Prompt);
+        type_str(&mut app, "cut-scene");
+        app.handle_key(key(KeyCode::Enter));
+        let file = dir.join("cut-scene.md");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "quick \n");
+        // Writing again over it asks first.
+        chord(&mut app, 'k', 'w');
+        type_str(&mut app, "cut-scene");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Confirm);
+        app.handle_key(key(KeyCode::Char('n')));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

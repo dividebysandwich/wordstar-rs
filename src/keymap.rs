@@ -102,7 +102,7 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'k' => {
             *state = ChordState::K;
             Resolution::Pending(
-                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H block  0-9 marker",
+                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H/W block  \" ' . case  0-9 marker",
             )
         }
         'q' => {
@@ -164,6 +164,10 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('h') => Resolution::Command(BlockHide),
         Some('r') => Resolution::Command(InsertFile),
         Some('?') => Resolution::Command(WordCount),
+        Some('w') => Resolution::Command(WriteBlock),
+        Some('"') => Resolution::Command(ChangeCase(crate::app::Case::Upper)),
+        Some('\'') => Resolution::Command(ChangeCase(crate::app::Case::Lower)),
+        Some('.') => Resolution::Command(ChangeCase(crate::app::Case::Sentence)),
         Some(c @ '0'..='9') => Resolution::Command(SetMarker(c as usize - '0' as usize)),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
