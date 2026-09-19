@@ -20,6 +20,7 @@ pub mod pdf;
 pub mod platform;
 pub mod preview;
 pub mod theme;
+pub mod track;
 pub mod ui;
 pub mod wordstar;
 pub mod wrap;

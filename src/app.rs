@@ -84,6 +84,9 @@ pub enum PromptKind {
     GoToPage,
     /// Set the right margin (the wrap column), stored as a `.rm` dot command.
     RightMargin,
+    /// Which place marker to set / go to (from the Edit menu).
+    SetMarker,
+    GotoMarker,
 }
 
 /// Header vs. footer for the [`Mode::Header`] dialog.
@@ -278,6 +281,14 @@ pub struct LastFind {
     pub options: FindOptions,
 }
 
+/// Positions that follow the text through edits (see [`crate::track`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Anchors {
+    markers: [Option<(usize, usize)>; 10],
+    prev: Option<(usize, usize)>,
+    block: Option<((usize, usize), (usize, usize))>,
+}
+
 /// An interactive replace in progress ([`Mode::ReplaceAsk`]).
 #[derive(Debug, Clone)]
 pub struct ReplaceSession {
@@ -319,6 +330,8 @@ pub struct App {
     /// Where the cursor was before the last long jump (find, go to page, …),
     /// for `^QP`.
     pub prev_pos: Option<(usize, usize)>,
+    /// Place markers `^K0`…`^K9`.
+    pub markers: [Option<(usize, usize)>; 10],
     /// The interactive replace in progress (when `mode == ReplaceAsk`).
     replace_session: Option<ReplaceSession>,
     /// Active confirmation modal (present when `mode == Confirm`).
@@ -453,6 +466,7 @@ impl App {
             prompt: PromptState::default(),
             last_find: None,
             prev_pos: None,
+            markers: [None; 10],
             replace_session: None,
             confirm: None,
             info: None,
@@ -511,9 +525,15 @@ impl App {
         Ok(app)
     }
 
-    /// Apply the WordStar look to the text widget (and give it a deep undo
-    /// history; the widget's default remembers only 50 keystrokes).
+    /// Set up a freshly created text widget: the WordStar look and a deep undo
+    /// history (the widget's default remembers only 50 keystrokes). Positions
+    /// kept for the previous text are dropped.
     fn apply_editor_theme(&mut self) {
+        // A new text: positions in the old one no longer mean anything.
+        self.markers = [None; 10];
+        self.prev_pos = None;
+        self.marked = None;
+        self.compound_undo = None;
         self.textarea.set_max_histories(UNDO_LEVELS);
         self.textarea.set_style(theme::canvas());
         // WordStar does not underline the current line; keep it plain.
@@ -559,6 +579,12 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        let before = self.tracking_snapshot();
+        self.dispatch_key(key);
+        self.follow_edits(before);
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) {
         match self.mode {
             Mode::Editor => self.handle_editor_key(key),
             Mode::Clean => self.handle_clean_key(key),
@@ -962,6 +988,15 @@ impl App {
                 let name = self.prompt.input.clone();
                 self.mode = Mode::Editor;
                 self.insert_file(&name);
+            }
+            PromptKind::SetMarker | PromptKind::GotoMarker => {
+                let set = self.prompt.kind == PromptKind::SetMarker;
+                self.mode = Mode::Editor;
+                match self.prompt.input.trim().parse::<usize>() {
+                    Ok(n) if n <= 9 && set => self.set_marker(n),
+                    Ok(n) if n <= 9 => self.goto_marker(n),
+                    _ => self.set_status("Markers are numbered 0 to 9."),
+                }
             }
             PromptKind::RightMargin => {
                 let raw = self.prompt.input.trim().to_string();
@@ -1959,6 +1994,101 @@ impl App {
         }
     }
 
+    /// The positions that follow the text as it is edited — place markers, the
+    /// previous position, the marked block — and the text they refer to, taken
+    /// before handling a key (only when there is something to track).
+    fn tracking_snapshot(&self) -> Option<(Anchors, Vec<String>)> {
+        let anchors = self.anchors();
+        let empty = anchors.markers.iter().all(Option::is_none)
+            && anchors.prev.is_none()
+            && anchors.block.is_none();
+        (!empty).then(|| (anchors, self.textarea.lines().to_vec()))
+    }
+
+    fn anchors(&self) -> Anchors {
+        Anchors {
+            markers: self.markers,
+            prev: self.prev_pos,
+            block: self.marked.as_ref().map(|b| (b.start, b.end)),
+        }
+    }
+
+    /// After a key was handled, move the tracked positions along with any edit
+    /// it made — except those the command itself just set.
+    fn follow_edits(&mut self, before: Option<(Anchors, Vec<String>)>) {
+        let Some((was, old)) = before else {
+            return;
+        };
+        let now = self.anchors();
+        let cursor = self.cursor_pos();
+        let Some(change) = crate::track::TextChange::new(&old, self.textarea.lines(), cursor)
+        else {
+            return;
+        };
+        let follow = |p: Option<(usize, usize)>, then: Option<(usize, usize)>| {
+            if p == then { p.map(|p| change.map(p)) } else { p }
+        };
+        let markers: Vec<_> = (0..10).map(|i| follow(now.markers[i], was.markers[i])).collect();
+        let prev = follow(now.prev, was.prev);
+        let block = match (now.block, was.block) {
+            (Some(b), Some(w)) if b == w => Some((change.map(b.0), change.map(b.1))),
+            (b, _) => b,
+        };
+        for (slot, m) in self.markers.iter_mut().zip(markers) {
+            *slot = m;
+        }
+        self.prev_pos = prev;
+        if let Some((start, end)) = block {
+            // The block keeps its ends as the text moves, and takes in any
+            // editing done inside it, as WordStar's does.
+            match self.text_between(start, end).filter(|_| start < end) {
+                Some(text) => {
+                    if let Some(b) = self.marked.as_mut() {
+                        b.start = start;
+                        b.end = end;
+                        b.text = text;
+                    }
+                }
+                None => self.marked = None,
+            }
+        }
+    }
+
+    /// `^K0`…`^K9` — set place marker `n` at the cursor (again, on the same
+    /// spot, removes it).
+    pub fn set_marker(&mut self, n: usize) {
+        let here = self.cursor_pos();
+        if self.markers[n] == Some(here) {
+            self.markers[n] = None;
+            self.set_status(format!("Marker {n} removed."));
+        } else {
+            self.markers[n] = Some(here);
+            self.set_status(format!("Marker {n} set — ^Q{n} returns here."));
+        }
+    }
+
+    /// Ask which place marker to set or go to (Edit menu).
+    pub fn start_marker_prompt(&mut self, set: bool) {
+        let (kind, label) = if set {
+            (PromptKind::SetMarker, "Set marker (0-9):")
+        } else {
+            (PromptKind::GotoMarker, "Go to marker (0-9):")
+        };
+        self.open_prompt(kind, label, String::new());
+    }
+
+    /// `^Q0`…`^Q9` — jump to place marker `n`.
+    pub fn goto_marker(&mut self, n: usize) {
+        match self.markers[n] {
+            Some(pos) => {
+                self.remember_position();
+                self.clear_marking();
+                self.textarea.move_cursor(jump(pos));
+            }
+            None => self.set_status(format!("Marker {n} is not set. Set it with ^K{n}.")),
+        }
+    }
+
     /// Note the cursor position before a long jump, for `^QP`.
     pub fn remember_position(&mut self) {
         self.prev_pos = Some(self.cursor_pos());
@@ -2783,6 +2913,12 @@ impl App {
     /// event) where the user is typing: into the document as a single undoable
     /// edit, or into the open prompt or dialog (first line only).
     pub fn handle_paste(&mut self, text: String) {
+        let before = self.tracking_snapshot();
+        self.paste(text);
+        self.follow_edits(before);
+    }
+
+    fn paste(&mut self, text: String) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let first_line = text.lines().next().unwrap_or("");
         match self.mode {
@@ -3956,15 +4092,64 @@ mod tests {
     }
 
     #[test]
-    fn a_block_edited_after_marking_is_not_acted_on() {
+    fn a_marked_block_follows_edits_made_while_it_is_marked() {
         let mut app = marked_quick();
         app.textarea.move_cursor(CursorMove::Head);
-        type_str(&mut app, "X");
+        type_str(&mut app, "X"); // before the block: it shifts along
+        app.textarea.move_cursor(CursorMove::Jump(0, 7));
+        type_str(&mut app, "Y"); // inside it: the block takes it in
+        assert_eq!(app.marked.as_ref().unwrap().text, "quYick ");
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'v');
+        assert_eq!(app.textarea.lines(), ["XThe brown fox.quYick "]);
+    }
+
+    #[test]
+    fn a_block_changed_behind_its_back_is_not_acted_on() {
+        let mut app = marked_quick();
+        // An edit that bypasses the key handling (and so the tracking).
+        app.textarea.move_cursor(CursorMove::Head);
+        app.textarea.insert_str("X");
         app.textarea.move_cursor(CursorMove::End);
         chord(&mut app, 'k', 'v');
         assert_eq!(app.textarea.lines(), ["XThe quick brown fox."], "nothing moved");
         assert!(app.marked.is_none());
         assert!(app.status_msg.as_deref().unwrap().contains("mark it again"));
+    }
+
+    #[test]
+    fn place_markers_follow_the_text_and_toggle() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Chapter one\nThe storm broke.");
+        app.textarea.move_cursor(CursorMove::Jump(1, 4));
+        chord(&mut app, 'k', '3');
+        assert_eq!(app.markers[3], Some((1, 4)));
+        // Add a paragraph above; the marker stays on "storm".
+        app.textarea.move_cursor(CursorMove::Jump(0, 11));
+        app.handle_key(key(KeyCode::Enter));
+        type_str(&mut app, "A new line.");
+        chord(&mut app, 'q', 'r');
+        chord(&mut app, 'q', '3');
+        assert_eq!(app.textarea.cursor(), (2, 4));
+        assert_eq!(&app.textarea.lines()[2][4..9], "storm");
+        // ^QP goes back to where ^Q3 came from.
+        chord(&mut app, 'q', 'p');
+        assert_eq!(app.textarea.cursor(), (0, 0));
+        // ^K3 on the marker's spot removes it.
+        chord(&mut app, 'q', '3');
+        chord(&mut app, 'k', '3');
+        assert_eq!(app.markers[3], None);
+        chord(&mut app, 'q', '3');
+        assert!(app.status_msg.as_deref().unwrap().contains("not set"));
+    }
+
+    #[test]
+    fn opening_another_text_forgets_markers() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("text");
+        chord(&mut app, 'k', '1');
+        app.new_document();
+        assert_eq!(app.markers[1], None);
     }
 
     #[test]

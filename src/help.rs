@@ -49,6 +49,8 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^QR / ^QC", "Start / End of document");
     row(&mut out, "^QB / ^QK", "Beginning / End of marked block");
     row(&mut out, "^QP", "Previous position (before the last jump)");
+    row(&mut out, "^K0-9", "Set place marker 0-9 (again: remove)");
+    row(&mut out, "^Q0-9", "Go to place marker 0-9");
     row(&mut out, "Arrows", "Modern cursor movement");
 
     head(&mut out, "Files & program");

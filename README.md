@@ -189,6 +189,9 @@ here, and the function keys are added for convenience.
 | `^Q` `^R` / `^Q` `^C` | Start / End of document |
 | `^Q` `^I`   | Go to page                      |
 | `^Q` `^B` / `^Q` `^K` | Beginning / End of the marked block |
+| `^K` `0`…`9` | Set place marker 0–9 at the cursor (again on the same spot removes it) |
+| `^Q` `0`…`9` | Go to place marker 0–9 |
+| `^Q` `^P`   | Back to where you were before the last jump |
 | Arrows, Home, End, PgUp, PgDn | Modern equivalents |
 
 ### Editing
@@ -220,9 +223,16 @@ or moved there.
 | `^KY` | Delete the block (it stays in the buffer, so `^KV` pastes it back) |
 | `^KH` | Hide / redisplay the block      |
 
-Bold, italic, and the other **Style** commands apply to the marked block too. A
-block that you edit after marking it is dropped rather than acted on, with a
-message asking you to mark it again.
+Bold, italic, and the other **Style** commands apply to the marked block too.
+The block stays attached to its text while you keep writing: typing before it
+moves it along, and typing inside it becomes part of it.
+
+**Place markers** work the same way. `^K3` drops marker 3 at the cursor — its
+number appears in the flag column and the spot is highlighted — and `^Q3` jumps
+back to it from anywhere, even after you have written pages above it. Use them
+to bookmark the scene you're revising, a character's first appearance, or where
+you stopped. (Markers belong to the editing session; they aren't saved in the
+file.)
 
 A selection made with the mouse (or still being marked, before `^KK`) acts like
 a clipboard selection instead: `^KC` copies it to the block buffer, `^KY` cuts
@@ -235,7 +245,6 @@ it, and `^KV` pastes the buffer at the cursor.
 | `^QF` | Find                            |
 | `^QA` | Find and replace                |
 | `^L`  | Find next (or carry on replacing) |
-| `^QP` | Back to where you were before the last jump |
 
 As in WordStar, after the text (and, for a replace, the replacement) you are
 asked for **options** — type any of these letters, or just press **Enter**:

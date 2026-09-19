@@ -89,6 +89,11 @@ pub fn selection() -> Style {
     Style::default().bg(Color::Cyan).fg(Color::Black)
 }
 
+/// A place marker (`^K0`…`^K9`) in the text and in the flag column.
+pub fn marker() -> Style {
+    Style::default().bg(Color::LightMagenta).fg(Color::Black)
+}
+
 /// Search-match highlight.
 pub fn search() -> Style {
     Style::default().bg(Color::Yellow).fg(Color::Black)

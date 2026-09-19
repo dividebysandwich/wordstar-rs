@@ -136,6 +136,12 @@ pub enum Command {
     GotoBlockEnd,
     /// Return to the position before the last long jump (^QP).
     PreviousPosition,
+    /// Set / go to place marker 0–9 (^K0–^K9 / ^Q0–^Q9).
+    SetMarker(usize),
+    GotoMarker(usize),
+    /// Ask which marker to set / go to (Edit menu).
+    SetMarkerPrompt,
+    GotoMarkerPrompt,
 
     /// A menu entry kept for fidelity but not yet implemented; the payload names
     /// the feature for the status message.
@@ -251,6 +257,10 @@ pub fn execute(app: &mut App, cmd: Command) {
         GotoBlockBegin => app.goto_block(false),
         GotoBlockEnd => app.goto_block(true),
         PreviousPosition => app.goto_previous_position(),
+        SetMarker(n) => app.set_marker(n),
+        GotoMarker(n) => app.goto_marker(n),
+        SetMarkerPrompt => app.start_marker_prompt(true),
+        GotoMarkerPrompt => app.start_marker_prompt(false),
 
         NotImplemented(feature) => app.not_implemented(feature),
     }

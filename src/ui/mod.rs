@@ -116,6 +116,7 @@ fn editor_pane(frame: &mut Frame, area: Rect, text_area: Rect, app: &App) {
     let height = text_area.height as usize;
     let top = scroll_top(app, text_area);
     block_overlay(frame, text_area, top, app);
+    marker_overlay(frame, text_area, top, app);
     let rows = app.visual_rows.borrow();
     let pages = app.row_pages.borrow();
     let lines = app.textarea.lines();
@@ -126,7 +127,14 @@ fn editor_pane(frame: &mut Frame, area: Rect, text_area: Rect, app: &App) {
         .fg(ratatui::style::Color::LightCyan);
     let flag_lines: Vec<Line> = (0..height)
         .map(|y| {
-            let ch = match rows.get(top + y) {
+            let row = rows.get(top + y);
+            let marker = row.and_then(|r| {
+                (0..10).find(|&n| app.markers[n].is_some_and(|p| row_holds(r, lines, p)))
+            });
+            if let Some(n) = marker {
+                return Line::from(Span::styled(n.to_string(), theme::marker()));
+            }
+            let ch = match row {
                 Some(r) if crate::attributes::is_dot_command(&lines[r.line]) => '.',
                 Some(_) if matches!(pages.get(top + y), Some(&(p, 1)) if p > 1) => 'P',
                 Some(r) if r.last => '<', // hard return — paragraph break
@@ -181,6 +189,43 @@ fn block_overlay(frame: &mut Frame, text_area: Rect, top: usize, app: &App) {
         let x1 = (offset + crate::wrap::char_to_x(text, b, tab)).min(text_area.width as usize);
         for x in x0..x1 {
             buf[(text_area.x + x as u16, text_area.y + y)].set_style(style);
+        }
+    }
+}
+
+/// Whether the document position `(line, col)` is shown on visual row `row`
+/// (the end of a wrapped row belongs to the next one).
+fn row_holds(row: &crate::wrap::VisualRow, lines: &[String], (line, col): (usize, usize)) -> bool {
+    if row.line != line {
+        return false;
+    }
+    let start = row.start_col(lines);
+    let len = row.text(lines).chars().count();
+    col >= start && (col < start + len || (row.last && col == start + len))
+}
+
+/// Highlight the character cell at each place marker (`^K0`…`^K9`).
+fn marker_overlay(frame: &mut Frame, text_area: Rect, top: usize, app: &App) {
+    let rows = app.visual_rows.borrow();
+    let lines = app.textarea.lines();
+    let tab = app.textarea.tab_length();
+    let buf = frame.buffer_mut();
+    for pos in app.markers.iter().flatten() {
+        let visible = rows
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take(text_area.height as usize)
+            .find(|(_, r)| row_holds(r, lines, *pos));
+        let Some((v, row)) = visible else {
+            continue;
+        };
+        let text = row.text(lines);
+        let x = app.row_offset(text, text_area.width as usize)
+            + crate::wrap::char_to_x(text, pos.1 - row.start_col(lines), tab);
+        if x < text_area.width as usize {
+            let cell = &mut buf[(text_area.x + x as u16, text_area.y + (v - top) as u16)];
+            cell.set_style(theme::marker());
         }
     }
 }
@@ -1371,6 +1416,20 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let m = app.cursor_metrics();
         assert_eq!((m.page, m.line), (2, 1));
+    }
+
+    #[test]
+    fn place_marker_shows_in_the_flag_column_and_text() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("alpha\nbeta");
+        app.markers[7] = Some((1, 2));
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(buf[(38, 5)].symbol(), "7", "digit in the flag column");
+        assert_eq!(buf[(2, 5)].bg, theme::marker().bg.unwrap(), "cell highlighted");
+        assert_eq!(buf[(38, 4)].symbol(), "<");
     }
 
     #[test]

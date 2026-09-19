@@ -102,13 +102,13 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'k' => {
             *state = ChordState::K;
             Resolution::Pending(
-                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H block",
+                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H block  0-9 marker",
             )
         }
         'q' => {
             *state = ChordState::Q;
             Resolution::Pending(
-                "^Q  Quick:  S/D line ends  R/C file ends  I)page  P)revious position  B/K block ends  F)ind  A)replace  Y)del line end  M)calc",
+                "^Q  Quick:  S/D line ends  R/C file ends  I)page  P)revious  0-9 marker  B/K block ends  F)ind  A)replace  Y)del line end  M)calc",
             )
         }
         'o' => {
@@ -164,6 +164,7 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('h') => Resolution::Command(BlockHide),
         Some('r') => Resolution::Command(InsertFile),
         Some('?') => Resolution::Command(WordCount),
+        Some(c @ '0'..='9') => Resolution::Command(SetMarker(c as usize - '0' as usize)),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }
@@ -186,6 +187,7 @@ fn resolve_q(key: KeyEvent) -> Resolution {
         Some('m') => Resolution::Command(Calculator),
         Some('i') => Resolution::Command(GoToPage),
         Some('p') => Resolution::Command(PreviousPosition),
+        Some(c @ '0'..='9') => Resolution::Command(GotoMarker(c as usize - '0' as usize)),
         Some('b') => Resolution::Command(GotoBlockBegin),
         Some('k') => Resolution::Command(GotoBlockEnd),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,

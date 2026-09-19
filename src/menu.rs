@@ -92,6 +92,8 @@ static EDIT: &[MenuItem] = &[
     item("Next Find", "^L", Command::FindNext),
     item("Go to Page...", "^QI", Command::GoToPage),
     item("Previous Position", "^QP", Command::PreviousPosition),
+    item("Set Marker...", "^K0-9", Command::SetMarkerPrompt),
+    item("Go to Marker...", "^Q0-9", Command::GotoMarkerPrompt),
     item("Go to Block Begin", "^QB", Command::GotoBlockBegin),
     item("Go to Block End", "^QK", Command::GotoBlockEnd),
 ];
@@ -409,6 +411,9 @@ mod tests {
                 continue;
             }
             let chord = item.shortcut.split(" /").next().unwrap_or("").trim();
+            if chord.ends_with("0-9") {
+                continue; // a range of keys, with a prompt behind the menu item
+            }
             let Some(keys) = chord.strip_prefix('^') else {
                 continue;
             };
