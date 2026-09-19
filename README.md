@@ -374,10 +374,38 @@ effect instead of appearing as text:
 | `.op` | Omit page numbers |
 | `.pn` *n* | Number the first page *n* |
 | `.rm` *n* | Right margin: wrap text at column *n* (`^OR` sets it) |
+| `.fi` *file* | Include another file here when printing (see *A book in several files*) |
 
 In header and footer text, `#` prints the page number: `.fo Page #` gives
 "Page 1", "Page 2", and so on. Original WordStar files keep these dot commands
 when imported.
+
+---
+
+### A book in several files
+
+Keep each chapter in its own file and write a short **master document** that
+lists them with WordStar's `.fi` ("file insert") dot command — **Insert →
+Include File** adds the line for you:
+
+```markdown
+---
+format: manuscript
+title: The Red House
+author: Jane Q. Writer
+---
+.fi chapters/01-arrival.md
+.fi chapters/02-the-house.md
+.fi chapters/03-night.md
+```
+
+The preview, the PDF export and the word count of the master cover the whole
+book — the title bar shows the total — while you edit each chapter on its own.
+Paths are relative to the file that includes them, included files may include
+others, and a chapter file's own frontmatter is ignored. A file that's missing
+shows up as `[Missing file: …]` in the proof so the gap can't slip by. In the
+master, **Go to Heading** (`^QG`) lists the chapter files: pick one to open it.
+(The browser version can't read other files, so `.fi` is skipped there.)
 
 ---
 

@@ -512,6 +512,7 @@ pub fn count_words(lines: &[String]) -> TextStats {
     for line in body {
         let t = line.trim();
         if is_dot_command(line)
+            || t.starts_with(crate::book::MISSING)
             || t.starts_with("```")
             || t.starts_with("~~~")
             || is_thematic_break(t)

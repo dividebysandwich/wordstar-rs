@@ -97,6 +97,8 @@ pub enum PromptKind {
     SpellReplace,
     /// Where to write the marked block (^KW).
     WriteBlock,
+    /// A chapter file to include with `.fi`.
+    IncludeFile,
 }
 
 /// Header vs. footer for the [`Mode::Header`] dialog.
@@ -351,6 +353,9 @@ pub struct OutlineItem {
     pub title: String,
     /// Printed page it falls on.
     pub page: usize,
+    /// For a `.fi` line in a master document: the chapter file it includes,
+    /// opened (rather than jumped to) when chosen.
+    pub file: Option<PathBuf>,
 }
 
 /// State backing the Go to Heading list ([`Mode::Outline`]).
@@ -477,6 +482,8 @@ pub struct App {
     pub browser: Option<crate::browser::Browser>,
     /// Scroll offset for the preview overlay.
     pub preview_scroll: u16,
+    /// The text the preview shows (the document with includes expanded).
+    pub preview_source: String,
     /// Scroll offset for the help overlay.
     pub help_scroll: u16,
     /// Open pull-down menu navigation state (used when `mode == Menu`).
@@ -612,6 +619,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             browser: None,
             preview_scroll: 0,
+            preview_source: String::new(),
             help_scroll: 0,
             menu: crate::menu::MenuState::default(),
             align: AlignChoice::Left,
@@ -1136,6 +1144,20 @@ impl App {
                 let name = self.prompt.input.clone();
                 self.mode = Mode::Editor;
                 self.insert_file(&name);
+            }
+            PromptKind::IncludeFile => {
+                let name = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                if name.is_empty() {
+                    return self.set_status("Cancelled.");
+                }
+                let found = crate::book::resolve(&name, self.document_dir().as_deref()).is_file();
+                let note = if found {
+                    format!("Included {name} — the preview, PDF and word count take it in.")
+                } else {
+                    format!("Included {name} (not found yet — it will print as missing).")
+                };
+                self.insert_dot_command(&format!(".fi {name}"), &note);
             }
             PromptKind::WriteBlock => {
                 let name = self.prompt.input.trim().to_string();
@@ -1662,11 +1684,14 @@ impl App {
             self.preview_pages.clear();
             self.clear_preview_protocols();
             self.preview_job = None;
+            let book = self.book_text();
             if self.graphics {
                 // Start an incremental render; the main loop drives it while the
                 // loading modal shows progress. `None` means no fonts → text view.
-                self.preview_job = crate::gfx::Job::new(&self.textarea.lines().join("\n"));
+                self.preview_job = crate::gfx::Job::new(&book.text);
             }
+            self.report_includes(&book);
+            self.preview_source = book.text;
             self.mode = Mode::Preview;
         }
     }
@@ -2231,6 +2256,35 @@ impl App {
         }
     }
 
+    /// The folder of the current document, if it has one.
+    fn document_dir(&self) -> Option<PathBuf> {
+        self.path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    }
+
+    /// The whole text to print: the document with its `.fi` includes expanded
+    /// (a master document's chapters pulled in).
+    pub fn book_text(&self) -> crate::book::Expanded {
+        let text = self.textarea.lines().join("\n");
+        if crate::book::has_includes(self.textarea.lines()) {
+            crate::book::expand(&text, self.document_dir().as_deref())
+        } else {
+            crate::book::Expanded {
+                text,
+                ..Default::default()
+            }
+        }
+    }
+
+    /// Insert ▸ Include File: add a `.fi` line pulling a chapter file into the
+    /// printout.
+    pub fn start_include_file(&mut self) {
+        self.open_prompt(PromptKind::IncludeFile, "Include file (.fi):", String::new());
+    }
+
     /// The spelling dictionary for this document (its frontmatter `language:`,
     /// US English by default), loaded the first time it's needed.
     pub fn speller(&self) -> Option<&crate::spell::Speller> {
@@ -2433,10 +2487,22 @@ impl App {
         }
         let mut in_fence = false;
         let mut out = Vec::new();
+        let base = self.document_dir();
         for (row, line) in lines.iter().enumerate().skip(body_start) {
             let t = line.trim_start();
             if t.starts_with("```") || t.starts_with("~~~") {
                 in_fence = !in_fence;
+                continue;
+            }
+            if let Some(name) = crate::book::include_target(line) {
+                // A chapter file of a master document.
+                out.push(OutlineItem {
+                    row,
+                    level: 1,
+                    title: format!("\u{25B8} {name}"),
+                    page: 0,
+                    file: Some(crate::book::resolve(name, base.as_deref())),
+                });
                 continue;
             }
             let level = t.chars().take_while(|&c| c == '#').count();
@@ -2450,7 +2516,13 @@ impl App {
             }
             let first_row = rows.partition_point(|r| r.line < row);
             let page = pages.get(first_row).map_or(row / LINES_PER_PAGE + 1, |p| p.0);
-            out.push(OutlineItem { row, level, title, page });
+            out.push(OutlineItem {
+                row,
+                level,
+                title,
+                page,
+                file: None,
+            });
         }
         out
     }
@@ -2568,12 +2640,16 @@ impl App {
             return;
         };
         self.mode = Mode::Editor;
-        if let Some(item) = o.items.get(o.selected) {
-            self.remember_position();
-            self.clear_marking();
-            self.textarea.move_cursor(jump((item.row, 0)));
-            self.set_status(format!("{} — page {}.  ^QP goes back.", item.title, item.page));
+        let Some(item) = o.items.get(o.selected) else {
+            return;
+        };
+        if let Some(file) = item.file.clone() {
+            return self.guard_unsaved(AfterSave::Open(file));
         }
+        self.remember_position();
+        self.clear_marking();
+        self.textarea.move_cursor(jump((item.row, 0)));
+        self.set_status(format!("{} — page {}.  ^QP goes back.", item.title, item.page));
     }
 
     /// `^K0`…`^K9` — set place marker `n` at the cursor (again, on the same
@@ -3123,6 +3199,20 @@ impl App {
             format!("Lines:        {}", group_digits(lines.len())),
             format!("Paragraphs:   {}", group_digits(stats.paragraphs)),
         ];
+        if crate::book::has_includes(lines) {
+            let book = self.book_text();
+            let book_lines: Vec<String> = book.text.lines().map(str::to_owned).collect();
+            let total = count_words(&book_lines).words;
+            out.push(format!(
+                "Whole book:   {} words in {} included file(s)",
+                group_digits(total),
+                book.files
+            ));
+            if !book.missing.is_empty() {
+                out.push(format!("Missing:      {}", book.missing.join(", ")));
+            }
+        }
+        let lines = self.textarea.lines();
         let delta = stats.words as isize - self.session_start_words as isize;
         out.push(format!("This session: {}{}", if delta < 0 { "-" } else { "+" }, group_digits(delta.unsigned_abs())));
         if let Some(goal) = crate::attributes::word_goal(lines) {
@@ -3147,8 +3237,8 @@ impl App {
         self.mode = Mode::Info;
     }
 
-    /// The document's word count, as `^K?` counts it; cached between frames
-    /// while the text is unchanged.
+    /// The document's word count, as `^K?` counts it — for a master document,
+    /// the whole book's; cached between frames while the text is unchanged.
     pub fn word_count(&self) -> usize {
         let hash = self.content_hash();
         if let Some((h, n)) = *self.word_count_cache.borrow()
@@ -3156,7 +3246,12 @@ impl App {
         {
             return n;
         }
-        let n = crate::attributes::count_words(self.textarea.lines()).words;
+        let n = if crate::book::has_includes(self.textarea.lines()) {
+            let book: Vec<String> = self.book_text().text.lines().map(str::to_owned).collect();
+            crate::attributes::count_words(&book).words
+        } else {
+            crate::attributes::count_words(self.textarea.lines()).words
+        };
         *self.word_count_cache.borrow_mut() = Some((hash, n));
         n
     }
@@ -3472,12 +3567,24 @@ impl App {
     }
 
     /// Write the PDF to `path`, reporting success or failure on the status line.
+    /// Mention included chapter files that couldn't be read.
+    fn report_includes(&mut self, book: &crate::book::Expanded) {
+        if !book.missing.is_empty() {
+            self.set_status(format!("Missing included file(s): {}", book.missing.join(", ")));
+        }
+    }
+
     fn do_export_pdf(&mut self, path: &Path) {
         let title = self.file_name();
-        let markdown = self.textarea.lines().join("\n");
-        let bytes = crate::pdf::export(&markdown, &title);
+        let book = self.book_text();
+        let bytes = crate::pdf::export(&book.text, &title);
         #[cfg(not(target_arch = "wasm32"))]
         match fs::write(path, bytes) {
+            Ok(()) if !book.missing.is_empty() => self.set_status(format!(
+                "Exported {} — missing included file(s): {}",
+                path.display(),
+                book.missing.join(", ")
+            )),
             Ok(()) => self.set_status(format!("Exported {}", path.display())),
             Err(e) => self.set_status(format!("PDF export failed: {e}")),
         }
@@ -5003,6 +5110,36 @@ mod tests {
         assert_eq!(app.mode, Mode::Editor);
         assert_eq!(app.path.as_deref(), Some(b.as_path()));
         assert_eq!(app.textarea.lines(), ["Chapter B"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn master_document_covers_the_whole_book() {
+        let dir = scratch("master");
+        std::fs::write(dir.join("ch1.md"), "# One\nIt was a dark and stormy night.\n").unwrap();
+        std::fs::write(dir.join("ch2.md"), "# Two\nMorning came.\n").unwrap();
+        let mut app = App::new(None).unwrap();
+        app.path = Some(dir.join("book.md"));
+        app.textarea.insert_str("---\ngoal: 100\n---\n.fi ch1.md\n.pa\n.fi ch2.md");
+        let book = app.book_text();
+        assert_eq!(book.files, 2);
+        app.textarea.insert_str("\n.fi missing.md");
+        assert_eq!(app.word_count(), 11, "a missing file's marker isn't counted");
+        assert!(book.text.contains("stormy night") && book.text.contains("Morning came"));
+        assert_eq!(app.word_count(), 11, "the title bar counts the whole book");
+        app.show_word_count();
+        let body = app.info.as_ref().unwrap().lines.join("\n");
+        assert!(body.contains("Whole book:   11 words in 2 included file(s)"), "{body}");
+        app.mode = Mode::Editor;
+        // Go to Heading lists the chapter files; choosing one opens it.
+        app.open_outline();
+        let titles: Vec<String> = app.outline.as_ref().unwrap().items.iter().map(|i| i.title.clone()).collect();
+        assert_eq!(titles, ["\u{25B8} ch1.md", "\u{25B8} ch2.md", "\u{25B8} missing.md"]);
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.path.as_deref(), Some(dir.join("ch2.md").as_path()));
+        assert_eq!(app.textarea.lines(), ["# Two", "Morning came."]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

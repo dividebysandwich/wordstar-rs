@@ -539,7 +539,13 @@ fn outline_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let entries: Vec<(String, String)> = o
         .items
         .iter()
-        .map(|h| (format!("{}{}", "  ".repeat(h.level - 1), h.title), format!("p. {}", h.page)))
+        .map(|h| {
+            let detail = match h.file {
+                Some(_) => "open".to_string(),
+                None => format!("p. {}", h.page),
+            };
+            (format!("{}{}", "  ".repeat(h.level - 1), h.title), detail)
+        })
         .collect();
     list_overlay(frame, area, app, " Go to Heading ", &entries, o.selected);
 }
@@ -912,7 +918,7 @@ fn preview_overlay(frame: &mut Frame, area: Rect, app: &App) {
         let _ = inner;
     } else {
         // Text preview fallback.
-        let lines = preview::render(&app.textarea.lines().join("\n"));
+        let lines = preview::render(&app.preview_source);
         let para = Paragraph::new(lines)
             .style(theme::canvas())
             .wrap(Wrap { trim: false })

@@ -113,6 +113,8 @@ pub enum Command {
     // --- insertion / utilities ---
     /// Insert the contents of another file at the cursor (^KR).
     InsertFile,
+    /// Add a `.fi` line including a chapter file in the printout.
+    IncludeFile,
     /// Insert a page-break dot command (`.pa`).
     PageBreak,
     /// Insert a column-break dot command (`.cb`).
@@ -258,6 +260,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         AlignJustify => app.set_align(AlignChoice::Justify),
 
         InsertFile => app.start_insert_file(),
+        IncludeFile => app.start_include_file(),
         PageBreak => app.insert_dot_command(".pa", "Page break inserted."),
         ColumnBreak => app.insert_dot_command(".cb", "Column break inserted."),
         Header => app.start_header(crate::app::HeaderKind::Header),

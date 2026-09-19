@@ -120,6 +120,7 @@ static INSERT: &[MenuItem] = &[
     item("Column Break", ".cb", Command::ColumnBreak),
     SEP,
     item("File...", "^KR", Command::InsertFile),
+    item("Include File (.fi)...", "", Command::IncludeFile),
     SEP,
     item("Manuscript Setup", "", Command::ManuscriptTemplate),
 ];
