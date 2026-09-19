@@ -67,7 +67,7 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Insert & utilities");
     row(&mut out, "^KR", "Insert file at cursor");
-    row(&mut out, "^K?", "Word count / document statistics");
+    row(&mut out, "^K?", "Word count (document, session, goal, block)");
     row(
         &mut out,
         ".pa / .cb",

@@ -239,7 +239,10 @@ pub fn strip_frontmatter(src: &str) -> &str {
 /// subset documents need: `key: value`, a key followed by `- item` lines,
 /// quoted values, and `# comments`.
 fn frontmatter(src: &str) -> Vec<(String, Vec<String>)> {
-    let mut lines = src.lines();
+    frontmatter_of(src.lines())
+}
+
+fn frontmatter_of<'a>(mut lines: impl Iterator<Item = &'a str>) -> Vec<(String, Vec<String>)> {
     if lines.next().map(str::trim) != Some("---") {
         return Vec::new();
     }
@@ -268,6 +271,32 @@ fn frontmatter(src: &str) -> Vec<(String, Vec<String>)> {
             let values = if value.is_empty() { Vec::new() } else { vec![value] };
             out.push((key.trim().to_ascii_lowercase(), values));
         }
+    }
+    out
+}
+
+/// The document's word-count goal (`goal: 80000`, `goal: 80,000` or
+/// `goal: 80k` in the frontmatter), if it sets one.
+pub fn word_goal(lines: &[String]) -> Option<usize> {
+    let fm = frontmatter_of(lines.iter().map(String::as_str));
+    let raw = fm.iter().find(|(k, _)| k == "goal")?.1.first()?.to_ascii_lowercase();
+    let (digits, scale) = match raw.strip_suffix('k') {
+        Some(d) => (d, 1000),
+        None => (raw.as_str(), 1),
+    };
+    let digits: String = digits.chars().filter(|c| !matches!(c, ',' | '_' | ' ')).collect();
+    digits.parse::<usize>().ok().map(|n| n * scale).filter(|&n| n > 0)
+}
+
+/// `n` with thousands separators: `12345` → `12,345`.
+pub fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
     }
     out
 }
@@ -855,6 +884,19 @@ mod tests {
         assert_eq!(s.first_page, 5);
         assert!(!s.omit_page_numbers);
         assert!(page_setup(".op").omit_page_numbers);
+    }
+
+    #[test]
+    fn word_goal_accepts_common_spellings() {
+        let doc = |g: &str| -> Vec<String> {
+            ["---".to_string(), format!("goal: {g}"), "---".to_string()].to_vec()
+        };
+        assert_eq!(word_goal(&doc("80000")), Some(80_000));
+        assert_eq!(word_goal(&doc("80,000")), Some(80_000));
+        assert_eq!(word_goal(&doc("50k")), Some(50_000));
+        assert_eq!(word_goal(&doc("lots")), None);
+        assert_eq!(word_goal(&["No frontmatter".to_string()]), None);
+        assert_eq!(group_digits(1_234_567), "1,234,567");
     }
 
     #[test]

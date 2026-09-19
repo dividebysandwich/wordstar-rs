@@ -812,12 +812,36 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// The title bar: the program and file name, centered, and the live word count
+/// (with the `goal:`, if the document sets one) at the right.
 fn title_bar(frame: &mut Frame, area: Rect, app: &App) {
+    use crate::attributes::group_digits;
     let title = format!("WordStar    {}", app.file_name());
+    let title_end = (area.width as usize + title.chars().count()).div_ceil(2);
     let p = Paragraph::new(title)
         .alignment(Alignment::Center)
         .style(theme::title_bar());
     frame.render_widget(p, area);
+
+    let words = app.word_count();
+    let count = match crate::attributes::word_goal(app.textarea.lines()) {
+        Some(goal) => format!("{} / {} words ", group_digits(words), group_digits(goal)),
+        None => format!("{} words ", group_digits(words)),
+    };
+    // Only where it fits beside the centered title.
+    if title_end + 2 + count.chars().count() <= area.width as usize {
+        let width = count.chars().count() as u16;
+        frame.render_widget(
+            Paragraph::new(count)
+                .alignment(Alignment::Right)
+                .style(theme::title_bar()),
+            Rect {
+                x: area.x + area.width - width,
+                width,
+                ..area
+            },
+        );
+    }
 }
 
 /// The leading-space offset before the first menu title.
@@ -1416,6 +1440,24 @@ mod tests {
         terminal.draw(|f| draw(f, &app)).unwrap();
         let m = app.cursor_metrics();
         assert_eq!((m.page, m.line), (2, 1));
+    }
+
+    #[test]
+    fn title_bar_shows_the_live_word_count_when_it_fits() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("---\ngoal: 50k\n---\nThree little words.");
+        let title_row = |w: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(w, 6)).unwrap();
+            terminal.draw(|f| draw(f, &app)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            (0..w).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>()
+        };
+        let wide = title_row(80);
+        assert!(wide.trim_end().ends_with("3 / 50,000 words"), "got {wide:?}");
+        assert!(wide.contains("WordStar    UNTITLED"));
+        let narrow = title_row(40);
+        assert!(!narrow.contains("words"), "no room: {narrow:?}");
+        assert!(narrow.contains("WordStar    UNTITLED"));
     }
 
     #[test]

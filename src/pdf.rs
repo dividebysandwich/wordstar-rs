@@ -885,15 +885,7 @@ fn approximate_words(words: usize) -> String {
     } else {
         (words + 50) / 100 * 100
     };
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+    crate::attributes::group_digits(n)
 }
 
 /// Pad or truncate `s` to exactly `w` characters (left-aligned).

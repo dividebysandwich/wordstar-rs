@@ -59,7 +59,9 @@ L----!----!----!----!----!----!----!----R----!----   <- ruler
                           Insert   P1  L16  V3.00"  C65  H6.40"   <- status line
 ```
 
-- **Title bar** — the program name and the current file (UNTITLED until saved).
+- **Title bar** — the program name and the current file (UNTITLED until saved),
+  and at the right a live word count — `12,345 / 80,000 words` if the document
+  sets a `goal:` (see below).
 - **Menu bar** — eight pull-down menus (see *Menus* below). Open with **F9**.
 - **Style bar** — the paragraph style and, for the text **under the cursor**,
   the active font, point size, and the **B I U** emphasis indicators. The
@@ -116,6 +118,7 @@ The same block holds a few options for the preview and the PDF:
 | `paragraphs: lines` | Type the WordStar way: every line you end with **Enter** is its own paragraph, and a Tab or spaces at its start are just an indent. Paragraphs are printed book-style, indented with no gap between them. (Without it, the file is standard Markdown: paragraphs are separated by a blank line, and an indented line after a blank one is a code block.) |
 | `smart: false` | Turn off typographic punctuation. By default `"quotes"` and `'apostrophes'` print curly, a typewriter `--` (or `---`) becomes an em dash (—), and `...` an ellipsis. |
 | `paper: letter` | Print on US Letter instead of A4 (`paper: a4`). |
+| `goal: 80000` | A word-count goal (`80,000` and `80k` work too), shown on the title bar and in **Word Count**. |
 | `format: manuscript` | Export in standard manuscript format — see *Exporting to PDF*. |
 
 A line holding just `#` is a scene break, as in a typed manuscript.
@@ -482,7 +485,10 @@ new page a third of the way down, and `END` marks the finish. Add
 on-screen preview keeps its usual look; the layout applies to the PDF.)
 
 The **Word Count** (`^K?`) counts what a reader would see, leaving out the
-frontmatter, dot commands, and Markdown markup.
+frontmatter, dot commands, and Markdown markup. It also shows how many words
+you've added since opening the document, your progress towards the `goal:`,
+and — with a block marked — the words in the block, handy for checking a single
+scene.
 
 ## File format
 

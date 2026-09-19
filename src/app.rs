@@ -332,6 +332,10 @@ pub struct App {
     pub prev_pos: Option<(usize, usize)>,
     /// Place markers `^K0`…`^K9`.
     pub markers: [Option<(usize, usize)>; 10],
+    /// Words in the document when it was opened, for "this session".
+    session_start_words: usize,
+    /// The live word count, cached against the text it was counted for.
+    word_count_cache: RefCell<Option<(u64, usize)>>,
     /// The interactive replace in progress (when `mode == ReplaceAsk`).
     replace_session: Option<ReplaceSession>,
     /// Active confirmation modal (present when `mode == Confirm`).
@@ -467,6 +471,8 @@ impl App {
             last_find: None,
             prev_pos: None,
             markers: [None; 10],
+            session_start_words: 0,
+            word_count_cache: RefCell::new(None),
             replace_session: None,
             confirm: None,
             info: None,
@@ -534,6 +540,7 @@ impl App {
         self.prev_pos = None;
         self.marked = None;
         self.compound_undo = None;
+        self.session_start_words = crate::attributes::count_words(self.textarea.lines()).words;
         self.textarea.set_max_histories(UNDO_LEVELS);
         self.textarea.set_style(theme::canvas());
         // WordStar does not underline the current line; keep it plain.
@@ -2500,20 +2507,58 @@ impl App {
     }
 
     /// Show document statistics in an info modal (^K?). Only the text a reader
-    /// sees counts: not the frontmatter, dot commands or Markdown markup.
+    /// sees counts: not the frontmatter, dot commands or Markdown markup. With a
+    /// block marked (or text selected), its count is shown too, along with this
+    /// session's progress and the document's `goal:`, if it sets one.
     pub fn show_word_count(&mut self) {
+        use crate::attributes::{count_words, group_digits};
+        let block = self
+            .selected_text()
+            .or_else(|| self.visible_block().map(|b| b.text.clone()));
         let lines = self.textarea.lines();
-        let stats = crate::attributes::count_words(lines);
+        let stats = count_words(lines);
+        let mut out = vec![
+            format!("Words:        {}", group_digits(stats.words)),
+            format!("Characters:   {}", group_digits(stats.chars)),
+            format!("Lines:        {}", group_digits(lines.len())),
+            format!("Paragraphs:   {}", group_digits(stats.paragraphs)),
+        ];
+        let delta = stats.words as isize - self.session_start_words as isize;
+        out.push(format!("This session: {}{}", if delta < 0 { "-" } else { "+" }, group_digits(delta.unsigned_abs())));
+        if let Some(goal) = crate::attributes::word_goal(lines) {
+            let pct = stats.words * 100 / goal;
+            let left = goal.saturating_sub(stats.words);
+            out.push(if left > 0 {
+                format!("Goal:         {} ({pct}%, {} to go)", group_digits(goal), group_digits(left))
+            } else {
+                format!("Goal:         {} — reached! ({pct}%)", group_digits(goal))
+            });
+        }
+        if let Some(text) = block {
+            let block_lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            let b = count_words(&block_lines);
+            out.push(String::new());
+            out.push(format!("Block:        {} words, {} characters", group_digits(b.words), group_digits(b.chars)));
+        }
         self.info = Some(InfoState {
             title: "Word Count".into(),
-            lines: vec![
-                format!("Words:       {}", stats.words),
-                format!("Characters:  {}", stats.chars),
-                format!("Lines:       {}", lines.len()),
-                format!("Paragraphs:  {}", stats.paragraphs),
-            ],
+            lines: out,
         });
         self.mode = Mode::Info;
+    }
+
+    /// The document's word count, as `^K?` counts it; cached between frames
+    /// while the text is unchanged.
+    pub fn word_count(&self) -> usize {
+        let hash = self.content_hash();
+        if let Some((h, n)) = *self.word_count_cache.borrow()
+            && h == hash
+        {
+            return n;
+        }
+        let n = crate::attributes::count_words(self.textarea.lines()).words;
+        *self.word_count_cache.borrow_mut() = Some((hash, n));
+        n
     }
 
     /// Insert ▸ Manuscript Setup: add the frontmatter that turns on standard
@@ -3635,12 +3680,30 @@ mod tests {
         let info = app.info.as_ref().unwrap();
         let body = info.lines.join("\n");
         // Markers are stripped, so "**two**" counts as one word: 5 total.
-        assert!(body.contains("Words:       5"), "got:\n{body}");
-        assert!(body.contains("Paragraphs:  2"), "got:\n{body}");
+        assert!(body.contains("Words:        5"), "got:\n{body}");
+        assert!(body.contains("Paragraphs:   2"), "got:\n{body}");
+        assert!(body.contains("This session: +5"), "got:\n{body}");
+        assert!(!body.contains("Block"), "no block marked");
         // Any key dismisses it.
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.mode, Mode::Editor);
         assert!(app.info.is_none());
+    }
+
+    #[test]
+    fn word_count_shows_the_block_and_the_goal() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("---\ngoal: 10\n---\none two three four");
+        app.textarea.move_cursor(CursorMove::Jump(3, 4));
+        app.block_begin();
+        app.textarea.move_cursor(CursorMove::Jump(3, 13));
+        app.block_end();
+        app.show_word_count();
+        let body = app.info.as_ref().unwrap().lines.join("\n");
+        assert!(body.contains("Words:        4"), "frontmatter not counted:\n{body}");
+        assert!(body.contains("Goal:         10 (40%, 6 to go)"), "got:\n{body}");
+        assert!(body.contains("Block:        2 words"), "got:\n{body}");
+        assert_eq!(app.word_count(), 4);
     }
 
     #[test]
