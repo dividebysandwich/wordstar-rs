@@ -234,9 +234,28 @@ it, and `^KV` pastes the buffer at the cursor.
 | ----- | ------------------------------- |
 | `^QF` | Find                            |
 | `^QA` | Find and replace                |
-| `^L`  | Find next                       |
+| `^L`  | Find next (or carry on replacing) |
+| `^QP` | Back to where you were before the last jump |
 
-Searches are literal (not regular expressions). At a prompt, **Enter** confirms
+As in WordStar, after the text (and, for a replace, the replacement) you are
+asked for **options** — type any of these letters, or just press **Enter**:
+
+| Option | Meaning |
+| ------ | ------- |
+| `U` | Ignore case: `ann` finds `Ann` and `ANN` |
+| `W` | Whole words only: `Ann` doesn't find `Anne` or `Planning` |
+| `B` | Search backwards |
+| `G` | The whole document, from the top (or the end, with `B`) |
+| `N` | Replace without asking |
+
+A replace highlights each match and asks: **Y** replaces it, **N** skips it,
+**A** replaces all the rest, **Esc** stops. However many it changed, one `^U`
+undoes the lot. Renaming a character everywhere is `^QA`, the old and new name,
+then `GWN`.
+
+Searches are literal (not regular expressions). Prompts offer your previous
+answer, highlighted: type to replace it, or use ←/→ (`^S`/`^D`), Home/End,
+Backspace and Del (`^G`) to edit it; `^Y` clears the line. **Enter** confirms
 and **Esc** cancels.
 
 ### Formatting

@@ -134,6 +134,8 @@ pub enum Command {
     /// Jump to the beginning / end of the marked block (^QB / ^QK).
     GotoBlockBegin,
     GotoBlockEnd,
+    /// Return to the position before the last long jump (^QP).
+    PreviousPosition,
 
     /// A menu entry kept for fidelity but not yet implemented; the payload names
     /// the feature for the status message.
@@ -181,10 +183,12 @@ pub fn execute(app: &mut App, cmd: Command) {
         // The very start / end of the text (the widget's Top / Bottom keep the
         // column).
         DocStart => {
+            app.remember_position();
             app.textarea.move_cursor(CursorMove::Top);
             app.textarea.move_cursor(CursorMove::Head);
         }
         DocEnd => {
+            app.remember_position();
             app.textarea.move_cursor(CursorMove::Bottom);
             app.textarea.move_cursor(CursorMove::End);
         }
@@ -246,6 +250,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         ManuscriptTemplate => app.insert_manuscript_template(),
         GotoBlockBegin => app.goto_block(false),
         GotoBlockEnd => app.goto_block(true),
+        PreviousPosition => app.goto_previous_position(),
 
         NotImplemented(feature) => app.not_implemented(feature),
     }

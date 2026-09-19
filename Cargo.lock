@@ -3095,6 +3095,7 @@ dependencies = [
  "ratatui-image",
  "ratatui-textarea",
  "ratzilla",
+ "regex",
  "unicode-script",
  "unicode-segmentation",
  "unicode-width",

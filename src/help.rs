@@ -48,6 +48,7 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^QS / ^QD", "Start / End of line");
     row(&mut out, "^QR / ^QC", "Start / End of document");
     row(&mut out, "^QB / ^QK", "Beginning / End of marked block");
+    row(&mut out, "^QP", "Previous position (before the last jump)");
     row(&mut out, "Arrows", "Modern cursor movement");
 
     head(&mut out, "Files & program");
@@ -86,8 +87,10 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Find & replace");
     row(&mut out, "^QF", "Find");
-    row(&mut out, "^QA", "Find and replace");
-    row(&mut out, "^L", "Find next");
+    row(&mut out, "^QA", "Find and replace (asks Y/N/A per match)");
+    row(&mut out, "", "Options: U ignore case, W whole words,");
+    row(&mut out, "", "B backwards, G whole document, N don't ask");
+    row(&mut out, "^L", "Find next / continue replacing");
 
     head(&mut out, "Blocks");
     row(&mut out, "^KB", "Mark block start (then move cursor)");

@@ -59,6 +59,8 @@ pub enum Mode {
     Header,
     /// The calculator dialog.
     Calculator,
+    /// Find and replace is asking whether to replace the highlighted match.
+    ReplaceAsk,
 }
 
 /// Which kind of single-line prompt is active.
@@ -66,7 +68,12 @@ pub enum Mode {
 pub enum PromptKind {
     #[default]
     Find,
+    /// Find's second step: the options (`B U W G`).
+    FindOptions,
+    /// Replace's steps: the text to find, its replacement, the options.
     Replace,
+    ReplaceWith,
+    ReplaceOptions,
     SaveAs,
     Font,
     FontSize,
@@ -190,8 +197,101 @@ pub struct PromptState {
     pub kind: PromptKind,
     pub label: String,
     pub input: String,
-    /// For replace: the search term captured in the first step.
+    /// Cursor position in `input`, in characters.
+    pub cursor: usize,
+    /// The input is a suggested default (the previous answer): typing replaces
+    /// it, while the arrow keys start editing it.
+    pub fresh: bool,
+    /// For find / replace: the search term captured in the first step.
     pub pending_find: Option<String>,
+    /// For replace: the replacement captured in the second step.
+    pub pending_replace: Option<String>,
+    /// Help shown under the input (e.g. the find option letters).
+    pub hint: &'static str,
+}
+
+/// Options for a find or replace, as WordStar asks for them after the search
+/// text: `B` search backwards, `U` ignore case, `W` whole words only, `G` the
+/// whole document (from the top, or the end when backwards), `N` replace
+/// without asking.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FindOptions {
+    pub backwards: bool,
+    pub ignore_case: bool,
+    pub whole_words: bool,
+    pub whole_document: bool,
+    pub no_ask: bool,
+}
+
+impl FindOptions {
+    /// Parse option letters (any case; other characters are ignored).
+    pub fn parse(s: &str) -> Self {
+        let has = |c: char| s.chars().any(|x| x.eq_ignore_ascii_case(&c));
+        Self {
+            backwards: has('b'),
+            ignore_case: has('u'),
+            whole_words: has('w'),
+            whole_document: has('g'),
+            no_ask: has('n'),
+        }
+    }
+
+    /// The option letters, for pre-filling the next prompt.
+    pub fn letters(&self) -> String {
+        [
+            (self.backwards, 'B'),
+            (self.ignore_case, 'U'),
+            (self.whole_words, 'W'),
+            (self.whole_document, 'G'),
+            (self.no_ask, 'N'),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, c)| *c)
+        .collect()
+    }
+
+    /// The regular expression matching `term` literally under these options.
+    fn pattern(&self, term: &str) -> String {
+        let is_word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let mut p = regex::escape(term);
+        // `\b` only makes sense next to a word character.
+        if self.whole_words && is_word(term.chars().next()) {
+            p.insert_str(0, "\\b");
+        }
+        if self.whole_words && is_word(term.chars().last()) {
+            p.push_str("\\b");
+        }
+        if self.ignore_case {
+            p.insert_str(0, "(?i)");
+        }
+        p
+    }
+}
+
+/// The most recent find or replace, repeated by `^L` and offered as the default
+/// the next time.
+#[derive(Debug, Clone)]
+pub struct LastFind {
+    pub find: String,
+    pub replace: Option<String>,
+    pub options: FindOptions,
+}
+
+/// An interactive replace in progress ([`Mode::ReplaceAsk`]).
+#[derive(Debug, Clone)]
+pub struct ReplaceSession {
+    regex: regex::Regex,
+    with: String,
+    backwards: bool,
+    no_ask: bool,
+    /// Where the search for the next match starts.
+    from: (usize, usize),
+    /// The match currently highlighted and awaiting an answer.
+    current: Option<((usize, usize), (usize, usize))>,
+    replaced: usize,
+    /// Widget undo steps the session has used, so one `^U` undoes it all.
+    undo_steps: usize,
 }
 
 /// The whole application.
@@ -214,6 +314,13 @@ pub struct App {
     pub status_msg: Option<String>,
     /// Active prompt overlay state (meaningful when `mode == Prompt`).
     pub prompt: PromptState,
+    /// The last find / replace (for `^L` and as the next default).
+    pub last_find: Option<LastFind>,
+    /// Where the cursor was before the last long jump (find, go to page, …),
+    /// for `^QP`.
+    pub prev_pos: Option<(usize, usize)>,
+    /// The interactive replace in progress (when `mode == ReplaceAsk`).
+    replace_session: Option<ReplaceSession>,
     /// Active confirmation modal (present when `mode == Confirm`).
     pub confirm: Option<ConfirmState>,
     /// Active information modal (present when `mode == Info`).
@@ -344,6 +451,9 @@ impl App {
             chord: ChordState::default(),
             status_msg: None,
             prompt: PromptState::default(),
+            last_find: None,
+            prev_pos: None,
+            replace_session: None,
             confirm: None,
             info: None,
             calc: None,
@@ -461,6 +571,7 @@ impl App {
             Mode::Info => self.handle_info_key(key),
             Mode::Header => self.handle_header_key(key),
             Mode::Calculator => self.handle_calc_key(key),
+            Mode::ReplaceAsk => self.handle_replace_key(key),
         }
     }
 
@@ -589,26 +700,34 @@ impl App {
     // Prompt overlay (find / replace / save-as)
     // ------------------------------------------------------------------
 
-    /// Open the find prompt.
+    /// Open the find prompt (`^QF`), offering the last search text.
     pub fn start_find(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::Find,
-            label: "Find:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        let last = self.last_find.as_ref().map(|f| f.find.clone()).unwrap_or_default();
+        self.open_prompt(PromptKind::Find, "Find:", last);
     }
 
-    /// Open the find-and-replace prompt (two steps).
+    /// Open find-and-replace (`^QA`): the text, its replacement, then options.
     pub fn start_replace(&mut self) {
+        let last = self.last_find.as_ref().map(|f| f.find.clone()).unwrap_or_default();
+        self.open_prompt(PromptKind::Replace, "Find:", last);
+    }
+
+    /// Open a prompt, offering `input` as the default answer.
+    fn open_prompt(&mut self, kind: PromptKind, label: &str, input: String) {
         self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::Replace,
-            label: "Find:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        self.prompt = PromptState::default();
+        self.prompt_step(kind, label, "", input);
+    }
+
+    /// Move the open prompt on to its next question, keeping what the earlier
+    /// steps collected. `hint` is shown under the input.
+    fn prompt_step(&mut self, kind: PromptKind, label: &str, hint: &'static str, input: String) {
+        self.prompt.kind = kind;
+        self.prompt.label = label.into();
+        self.prompt.hint = hint;
+        self.prompt.cursor = input.chars().count();
+        self.prompt.fresh = !input.is_empty();
+        self.prompt.input = input;
     }
 
     /// Open the save-as prompt, pre-filled with the current file name (relative
@@ -620,13 +739,7 @@ impl App {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::SaveAs,
-            label: "Save as:".into(),
-            input: current,
-            pending_find: None,
-        };
+        self.open_prompt(PromptKind::SaveAs, "Save as:", current);
     }
 
     /// Turn a typed Save As name into a path: `~/` expands to the home folder, a
@@ -657,48 +770,135 @@ impl App {
 
     /// Open the font-name prompt.
     pub fn start_font_prompt(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::Font,
-            label: "Font name:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        self.open_prompt(PromptKind::Font, "Font name:", String::new());
     }
 
     /// Open the font-size prompt.
     pub fn start_size_prompt(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::FontSize,
-            label: "Font size:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        self.open_prompt(PromptKind::FontSize, "Font size:", String::new());
     }
 
+    /// Line editing in a prompt: arrows (or `^S`/`^D`), Home/End, Backspace,
+    /// Del (or `^G`), `^Y` to clear. A pre-filled default is replaced by typing.
     fn handle_prompt_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let p = &mut self.prompt;
+        let len = p.input.chars().count();
+        p.cursor = p.cursor.min(len);
+        let byte_at = |s: &str, i: usize| s.char_indices().nth(i).map_or(s.len(), |(b, _)| b);
+        let clear = |p: &mut PromptState| {
+            p.input.clear();
+            p.cursor = 0;
+        };
+        match (key.code, ctrl) {
+            (KeyCode::Esc, _) => {
                 self.mode = Mode::Editor;
                 self.after_save = None;
                 self.set_status("Cancelled.");
+                return;
             }
-            KeyCode::Enter => self.confirm_prompt(),
-            KeyCode::Backspace => {
-                self.prompt.input.pop();
+            (KeyCode::Enter, _) => {
+                self.confirm_prompt();
+                return;
             }
-            KeyCode::Char(c) => self.prompt.input.push(c),
-            _ => {}
+            (KeyCode::Left, _) | (KeyCode::Char('s'), true) => p.cursor = p.cursor.saturating_sub(1),
+            (KeyCode::Right, _) | (KeyCode::Char('d'), true) => p.cursor = (p.cursor + 1).min(len),
+            (KeyCode::Home, _) => p.cursor = 0,
+            (KeyCode::End, _) => p.cursor = len,
+            (KeyCode::Char('y'), true) => clear(p),
+            (KeyCode::Backspace, _) | (KeyCode::Char('h'), true) => {
+                if p.fresh {
+                    clear(p);
+                } else if p.cursor > 0 {
+                    p.cursor -= 1;
+                    let at = byte_at(&p.input, p.cursor);
+                    p.input.remove(at);
+                }
+            }
+            (KeyCode::Delete, _) | (KeyCode::Char('g'), true) => {
+                if p.fresh {
+                    clear(p);
+                } else if p.cursor < len {
+                    let at = byte_at(&p.input, p.cursor);
+                    p.input.remove(at);
+                }
+            }
+            (KeyCode::Char(c), false) if !alt => {
+                if p.fresh {
+                    clear(p);
+                }
+                let at = byte_at(&p.input, p.cursor);
+                p.input.insert(at, c);
+                p.cursor += 1;
+            }
+            _ => return,
         }
+        // Any edit or cursor move turns a suggested default into ordinary text.
+        self.prompt.fresh = false;
     }
 
     fn confirm_prompt(&mut self) {
         match self.prompt.kind {
-            PromptKind::Find => {
-                let query = self.prompt.input.clone();
+            PromptKind::Find | PromptKind::Replace => {
+                let find = self.prompt.input.clone();
+                let replacing = self.prompt.kind == PromptKind::Replace;
+                if find.is_empty() {
+                    self.mode = Mode::Editor;
+                    let _ = self.textarea.set_search_pattern("");
+                    self.set_status(if replacing {
+                        "Replace cancelled."
+                    } else {
+                        "Search cleared."
+                    });
+                    return;
+                }
+                self.prompt.pending_find = Some(find);
+                let last = self.last_find.clone();
+                if replacing {
+                    let with = last.and_then(|f| f.replace).unwrap_or_default();
+                    self.prompt_step(PromptKind::ReplaceWith, "Replace with:", "", with);
+                } else {
+                    // Offer the previous options (minus "don't ask", a replace one).
+                    let options = last
+                        .map(|f| FindOptions { no_ask: false, ..f.options }.letters())
+                        .unwrap_or_default();
+                    self.prompt_step(
+                        PromptKind::FindOptions,
+                        "Options:",
+                        "B backwards · U ignore case · W whole words · G whole document",
+                        options,
+                    );
+                }
+            }
+            PromptKind::ReplaceWith => {
+                self.prompt.pending_replace = Some(self.prompt.input.clone());
+                let options = self
+                    .last_find
+                    .as_ref()
+                    .map(|f| f.options.letters())
+                    .unwrap_or_default();
+                self.prompt_step(
+                    PromptKind::ReplaceOptions,
+                    "Options:",
+                    "B back · U ignore case · W whole words · G whole doc · N don't ask",
+                    options,
+                );
+            }
+            PromptKind::FindOptions | PromptKind::ReplaceOptions => {
+                let options = FindOptions::parse(&self.prompt.input);
+                let find = self.prompt.pending_find.take().unwrap_or_default();
+                let replace = self.prompt.pending_replace.take();
                 self.mode = Mode::Editor;
-                self.run_search(&query);
+                self.last_find = Some(LastFind {
+                    find: find.clone(),
+                    replace: replace.clone(),
+                    options: options.clone(),
+                });
+                match replace {
+                    Some(with) => self.start_replace_session(&find, &with, &options, true),
+                    None => self.run_find(&find, &options, true),
+                }
             }
             PromptKind::SaveAs => {
                 let name = self.prompt.input.trim().to_string();
@@ -783,72 +983,248 @@ impl App {
                     Err(_) => self.set_status("Page must be a number."),
                 }
             }
-            PromptKind::Replace => {
-                if self.prompt.pending_find.is_none() {
-                    // First step done: capture the search term, ask for replacement.
-                    let find = self.prompt.input.clone();
-                    if find.is_empty() {
-                        self.mode = Mode::Editor;
-                        self.set_status("Replace cancelled.");
-                        return;
-                    }
-                    self.prompt.pending_find = Some(find);
-                    self.prompt.label = "Replace with:".into();
-                    self.prompt.input.clear();
-                } else {
-                    let find = self.prompt.pending_find.take().unwrap();
-                    let with = self.prompt.input.clone();
-                    self.mode = Mode::Editor;
-                    self.replace_all(&find, &with);
-                }
-            }
         }
     }
 
-    /// Set the search pattern (literal) and jump to the first match.
-    fn run_search(&mut self, query: &str) {
-        if query.is_empty() {
-            let _ = self.textarea.set_search_pattern("");
-            self.set_status("Search cleared.");
-            return;
-        }
-        let pattern = regex_escape(query);
-        match self.textarea.set_search_pattern(&pattern) {
-            Ok(()) => {
-                if self.textarea.search_forward(false) {
-                    self.set_status(format!("Found \"{query}\". ^L finds next."));
-                } else {
-                    self.set_status(format!("\"{query}\" not found."));
-                }
+    /// Find `find` with `options` and put the cursor on the match. `first` is
+    /// the initial search (from `^QF`), where `G` means start from the top (or
+    /// the end); repeats with `^L` carry on from the cursor.
+    fn run_find(&mut self, find: &str, options: &FindOptions, first: bool) {
+        let pattern = options.pattern(find);
+        let regex = match regex::Regex::new(&pattern) {
+            Ok(r) => r,
+            Err(e) => return self.set_status(format!("Bad search: {e}")),
+        };
+        // The widget highlights every match.
+        let _ = self.textarea.set_search_pattern(&pattern);
+        let from_edge = first && options.whole_document;
+        let from = if from_edge {
+            self.document_edge(options.backwards)
+        } else {
+            self.cursor_pos()
+        };
+        match self.next_match(&regex, from, options.backwards, !from_edge) {
+            Some((start, _)) => {
+                self.remember_position();
+                self.clear_marking();
+                self.textarea.move_cursor(jump(start));
+                self.set_status(format!("Found \"{find}\". ^L finds the next."));
             }
-            Err(e) => self.set_status(format!("Bad search: {e}")),
+            None if first => self.set_status(format!("\"{find}\" not found.")),
+            None => self.set_status("No more matches."),
         }
     }
 
-    /// Repeat the most recent search forward.
+    /// `^L` — repeat the last find, or carry on with the last replace.
     pub fn find_next(&mut self) {
-        if self.textarea.search_pattern().is_none() {
+        let Some(last) = self.last_find.clone() else {
             self.set_status("No active search. Use ^QF to find.");
             return;
-        }
-        if !self.textarea.search_forward(false) {
-            self.set_status("No more matches.");
+        };
+        match &last.replace {
+            None => self.run_find(&last.find, &last.options, false),
+            Some(with) => self.start_replace_session(&last.find, with, &last.options, false),
         }
     }
 
-    /// Replace every occurrence of `find` with `with`.
+    /// The very start of the document, or its end.
+    fn document_edge(&self, end: bool) -> (usize, usize) {
+        if end {
+            let lines = self.textarea.lines();
+            let last = lines.len() - 1;
+            (last, lines[last].chars().count())
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// The next match of `regex` after (or before, `backwards`) `from`, as
+    /// `(start, end)` positions. With `skip_at`, a match starting exactly at
+    /// `from` doesn't count. The search stops at the document's edge.
+    fn next_match(
+        &self,
+        regex: &regex::Regex,
+        from: (usize, usize),
+        backwards: bool,
+        skip_at: bool,
+    ) -> Option<((usize, usize), (usize, usize))> {
+        let lines = self.textarea.lines();
+        let col_of = |line: &str, byte: usize| line[..byte].chars().count();
+        let span = |row: usize, m: regex::Match| {
+            let line = &lines[row];
+            ((row, col_of(line, m.start())), (row, col_of(line, m.end())))
+        };
+        if backwards {
+            for row in (0..=from.0.min(lines.len() - 1)).rev() {
+                let line = &lines[row];
+                let before = |m: &regex::Match| {
+                    row != from.0 || {
+                        let c = col_of(line, m.start());
+                        if skip_at { c < from.1 } else { c <= from.1 }
+                    }
+                };
+                if let Some(m) = regex.find_iter(line).filter(before).last() {
+                    return Some(span(row, m));
+                }
+            }
+            return None;
+        }
+        for (row, line) in lines.iter().enumerate().skip(from.0) {
+            let min_col = if row == from.0 { from.1 + usize::from(skip_at) } else { 0 };
+            if min_col > line.chars().count() {
+                continue;
+            }
+            let at = line.char_indices().nth(min_col).map_or(line.len(), |(b, _)| b);
+            if let Some(m) = regex.find_at(line, at) {
+                return Some(span(row, m));
+            }
+        }
+        None
+    }
+
+    /// Start replacing `find` with `with`. Unless the `N` option says not to
+    /// ask, each match is highlighted in turn with a Y/N question. `G` covers the
+    /// whole document; otherwise it runs from the cursor to the end (or start).
+    fn start_replace_session(&mut self, find: &str, with: &str, options: &FindOptions, first: bool) {
+        let pattern = options.pattern(find);
+        let regex = match regex::Regex::new(&pattern) {
+            Ok(r) => r,
+            Err(e) => return self.set_status(format!("Bad search: {e}")),
+        };
+        let _ = self.textarea.set_search_pattern(&pattern);
+        let from_edge = first && options.whole_document;
+        if from_edge && options.no_ask {
+            // Everything, without asking: one edit for the lot.
+            self.replace_all(&regex, with);
+            return;
+        }
+        let from = if from_edge {
+            self.document_edge(options.backwards)
+        } else {
+            self.cursor_pos()
+        };
+        self.clear_marking();
+        self.replace_session = Some(ReplaceSession {
+            regex,
+            with: with.to_string(),
+            backwards: options.backwards,
+            no_ask: options.no_ask,
+            from,
+            current: None,
+            replaced: 0,
+            undo_steps: 0,
+        });
+        self.advance_replace();
+    }
+
+    /// Find the session's next match: replace it straight away (`N`), or
+    /// highlight it and ask.
+    fn advance_replace(&mut self) {
+        loop {
+            let Some(s) = self.replace_session.as_ref() else {
+                return;
+            };
+            let (regex, from, backwards, no_ask) = (s.regex.clone(), s.from, s.backwards, s.no_ask);
+            let Some((start, end)) = self.next_match(&regex, from, backwards, backwards) else {
+                self.finish_replace();
+                return;
+            };
+            if no_ask {
+                self.replace_match(start, end);
+                continue;
+            }
+            self.textarea.cancel_selection();
+            self.textarea.move_cursor(jump(start));
+            self.textarea.start_selection();
+            self.textarea.move_cursor(jump(end));
+            if let Some(s) = self.replace_session.as_mut() {
+                s.current = Some((start, end));
+            }
+            self.mode = Mode::ReplaceAsk;
+            self.set_status("Replace this one?  Y)es  N)o  A)ll the rest  Esc) stop");
+            return;
+        }
+    }
+
+    /// Replace the match from `start` to `end` and move the search past it.
+    fn replace_match(&mut self, start: (usize, usize), end: (usize, usize)) {
+        let Some(with) = self.replace_session.as_ref().map(|s| s.with.clone()) else {
+            return;
+        };
+        self.textarea.cancel_selection();
+        self.textarea.move_cursor(jump(start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(end));
+        self.textarea.insert_str(&with);
+        self.modified = true;
+        let after = self.cursor_pos();
+        if let Some(s) = self.replace_session.as_mut() {
+            s.undo_steps += 1 + usize::from(!with.is_empty());
+            s.replaced += 1;
+            s.from = if s.backwards { start } else { after };
+        }
+    }
+
+    /// Keys while a replace is asking about the highlighted match.
+    fn handle_replace_key(&mut self, key: KeyEvent) {
+        let current = self.replace_session.as_mut().and_then(|s| s.current.take());
+        let Some((start, end)) = current else {
+            return self.finish_replace();
+        };
+        match key.code {
+            KeyCode::Char('y' | 'Y') => self.replace_match(start, end),
+            KeyCode::Char('a' | 'A') => {
+                if let Some(s) = self.replace_session.as_mut() {
+                    s.no_ask = true;
+                }
+                self.replace_match(start, end);
+            }
+            KeyCode::Char('n' | 'N') => {
+                if let Some(s) = self.replace_session.as_mut() {
+                    s.from = if s.backwards { start } else { end };
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => return self.finish_replace(),
+            _ => {
+                // Not an answer: keep asking about the same match.
+                if let Some(s) = self.replace_session.as_mut() {
+                    s.current = Some((start, end));
+                }
+                return;
+            }
+        }
+        self.advance_replace();
+    }
+
+    /// End the replace session and report; one `^U` undoes all of it.
+    fn finish_replace(&mut self) {
+        let Some(s) = self.replace_session.take() else {
+            return;
+        };
+        self.textarea.cancel_selection();
+        self.mode = Mode::Editor;
+        if s.undo_steps > 0 {
+            self.compound_undo = Some((self.content_hash(), s.undo_steps));
+        }
+        match s.replaced {
+            0 => self.set_status("No matches to replace."),
+            n => self.set_status(format!("Replaced {n} occurrence(s) — ^U undoes.")),
+        }
+    }
+
+    /// Replace every match of `regex` with `with`.
     ///
     /// Only the span between the first and last change is rewritten, as a single
     /// selection edit, so the cursor, search and undo history survive and one
     /// `^U` restores the original text.
-    fn replace_all(&mut self, find: &str, with: &str) {
+    fn replace_all(&mut self, regex: &regex::Regex, with: &str) {
         let text = self.textarea.lines().join("\n");
-        let count = text.matches(find).count();
+        let count = regex.find_iter(&text).count();
         if count == 0 {
-            self.set_status(format!("\"{find}\" not found."));
+            self.set_status("No matches to replace.");
             return;
         }
-        let replaced = text.replace(find, with);
+        let replaced = regex.replace_all(&text, regex::NoExpand(with)).into_owned();
         let old: Vec<char> = text.chars().collect();
         let new: Vec<char> = replaced.chars().collect();
         let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -1508,6 +1884,7 @@ impl App {
         match &self.marked {
             Some(b) => {
                 let pos = if end { b.end } else { b.start };
+                self.prev_pos = Some(self.cursor_pos());
                 self.clear_marking();
                 self.textarea.move_cursor(jump(pos));
             }
@@ -1579,6 +1956,26 @@ impl App {
         // With a selection active this deletes exactly it, without yanking.
         if self.textarea.delete_line_by_end() {
             self.modified = true;
+        }
+    }
+
+    /// Note the cursor position before a long jump, for `^QP`.
+    pub fn remember_position(&mut self) {
+        self.prev_pos = Some(self.cursor_pos());
+    }
+
+    /// `^QP` — return to where the cursor was before the last long jump (find,
+    /// go to page, start/end of document, block ends…). Pressing it again
+    /// swaps back.
+    pub fn goto_previous_position(&mut self) {
+        match self.prev_pos {
+            Some(pos) => {
+                let here = self.cursor_pos();
+                self.clear_marking();
+                self.textarea.move_cursor(jump(pos));
+                self.prev_pos = Some(here);
+            }
+            None => self.set_status("No previous position yet."),
         }
     }
 
@@ -1722,13 +2119,7 @@ impl App {
 
     /// Open the "insert file" prompt (^KR).
     pub fn start_insert_file(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::InsertFile,
-            label: "Insert file:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        self.open_prompt(PromptKind::InsertFile, "Insert file:", String::new());
     }
 
     /// Read `path` and insert its text at the cursor. WordStar files are decoded
@@ -1775,19 +2166,14 @@ impl App {
 
     /// Open the page-jump prompt.
     pub fn start_goto_page(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::GoToPage,
-            label: "Go to page:".into(),
-            input: String::new(),
-            pending_find: None,
-        };
+        self.open_prompt(PromptKind::GoToPage, "Go to page:", String::new());
     }
 
     /// Jump the cursor to the first printed line of the given 1-based page, using
     /// the same pagination as the status line (wrapped rows, `.pa` breaks).
     fn goto_page(&mut self, page: usize) {
         let page = page.max(1);
+        self.remember_position();
         let target = {
             let rows = self.visual_rows.borrow();
             let pages = self.row_pages.borrow();
@@ -1816,13 +2202,8 @@ impl App {
 
     /// Open the right-margin prompt (`^OR`), pre-filled with the current margin.
     pub fn start_right_margin(&mut self) {
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::RightMargin,
-            label: "Right margin (column):".into(),
-            input: self.right_margin().to_string(),
-            pending_find: None,
-        };
+        let margin = self.right_margin().to_string();
+        self.open_prompt(PromptKind::RightMargin, "Right margin (column):", margin);
     }
 
     /// The right margin — the column text wraps at: the document's first `.rm N`
@@ -2298,17 +2679,12 @@ impl App {
         let manuscript = crate::attributes::render_options(&self.textarea.lines().join("\n"))
             .manuscript
             .is_some();
-        self.mode = Mode::Prompt;
-        self.prompt = PromptState {
-            kind: PromptKind::ExportPdf,
-            label: if manuscript {
-                "Export manuscript PDF as:".into()
-            } else {
-                "Export PDF as:".into()
-            },
-            input: default.to_string_lossy().into_owned(),
-            pending_find: None,
+        let label = if manuscript {
+            "Export manuscript PDF as:"
+        } else {
+            "Export PDF as:"
         };
+        self.open_prompt(PromptKind::ExportPdf, label, default.to_string_lossy().into_owned());
     }
 
     /// Write the PDF to `path`, reporting success or failure on the status line.
@@ -2416,7 +2792,16 @@ impl App {
                     self.modified = true;
                 }
             }
-            Mode::Prompt => self.prompt.input.push_str(first_line),
+            Mode::Prompt => {
+                let p = &mut self.prompt;
+                if std::mem::take(&mut p.fresh) {
+                    p.input.clear();
+                    p.cursor = 0;
+                }
+                let at = p.input.char_indices().nth(p.cursor).map_or(p.input.len(), |(b, _)| b);
+                p.input.insert_str(at, first_line);
+                p.cursor += first_line.chars().count();
+            }
             Mode::Header => {
                 if let Some(h) = self.header_dialog.as_mut() {
                     h.text.push_str(first_line);
@@ -2450,7 +2835,11 @@ impl App {
                     self.mode = Mode::Editor;
                 }
             }
-            Mode::Prompt | Mode::Confirm | Mode::Header | Mode::Calculator => {} // keyboard-only
+            Mode::Prompt
+            | Mode::Confirm
+            | Mode::Header
+            | Mode::Calculator
+            | Mode::ReplaceAsk => {} // keyboard-only
         }
     }
 
@@ -2973,22 +3362,6 @@ fn text_to_lines(text: &str) -> Vec<String> {
     }
 }
 
-/// Escape regex metacharacters so a user's search term is matched literally
-/// (WordStar's find is literal by default).
-fn regex_escape(s: &str) -> String {
-    const SPECIAL: &[char] = &[
-        '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$', '#', '&', '-', '~',
-    ];
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if SPECIAL.contains(&c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 fn ring_bell() {
     use std::io::Write;
     let _ = std::io::stdout().write_all(b"\x07");
@@ -3359,12 +3732,121 @@ mod tests {
         assert_eq!(app.textarea.lines(), [""]);
     }
 
+    fn literal(s: &str) -> regex::Regex {
+        regex::Regex::new(&regex::escape(s)).unwrap()
+    }
+
+    /// Run `^QF` (or `^QA` with `replace`) through its prompts.
+    fn find_via_prompts(app: &mut App, find: &str, replace: Option<&str>, options: &str) {
+        chord(app, 'q', if replace.is_some() { 'a' } else { 'f' });
+        app.handle_key(ctrl('y')); // clear any suggested default
+        type_str(app, find);
+        app.handle_key(key(KeyCode::Enter));
+        if let Some(with) = replace {
+            app.handle_key(ctrl('y'));
+            type_str(app, with);
+            app.handle_key(key(KeyCode::Enter));
+        }
+        app.handle_key(ctrl('y'));
+        type_str(app, options);
+        app.handle_key(key(KeyCode::Enter));
+    }
+
+    #[test]
+    fn prompt_default_is_replaced_by_typing_but_editable_with_arrows() {
+        let mut app = App::new(None).unwrap();
+        app.open_prompt(PromptKind::GoToPage, "Page:", "12".into());
+        type_str(&mut app, "7");
+        assert_eq!(app.prompt.input, "7", "typing replaces the default");
+        app.open_prompt(PromptKind::GoToPage, "Page:", "12".into());
+        app.handle_key(key(KeyCode::Left));
+        type_str(&mut app, "5");
+        assert_eq!(app.prompt.input, "152", "arrows start editing it");
+        app.handle_key(ctrl('s')); // ^S is left, WordStar-style
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(app.prompt.input, "12");
+        app.handle_key(ctrl('u')); // other control keys don't type letters
+        assert_eq!(app.prompt.input, "12");
+        app.handle_key(ctrl('y'));
+        assert_eq!(app.prompt.input, "");
+    }
+
+    #[test]
+    fn find_options_ignore_case_whole_words_and_backwards() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Anne met ann.\nANN left, then Ann.");
+        app.textarea.move_cursor(CursorMove::Jump(0, 0));
+        find_via_prompts(&mut app, "ann", None, "wu");
+        assert_eq!(app.textarea.cursor(), (0, 9), "whole word, any case: not Anne");
+        app.handle_key(ctrl('l'));
+        assert_eq!(app.textarea.cursor(), (1, 0));
+        app.handle_key(ctrl('l'));
+        assert_eq!(app.textarea.cursor(), (1, 15));
+        app.handle_key(ctrl('l'));
+        assert!(app.status_msg.as_deref().unwrap().contains("No more"));
+        // Backwards from the end of the document (G B).
+        find_via_prompts(&mut app, "Ann", None, "GB");
+        assert_eq!(app.textarea.cursor(), (1, 15));
+        app.handle_key(ctrl('l'));
+        assert_eq!(app.textarea.cursor(), (0, 0), "case-sensitive: skips ann and ANN");
+        // The next ^QF offers the last text and options.
+        chord(&mut app, 'q', 'f');
+        assert_eq!(app.prompt.input, "Ann");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.prompt.input, "BG");
+    }
+
+    #[test]
+    fn replace_asks_for_each_match_and_undoes_as_one() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Ann and Anne and Ann");
+        find_via_prompts(&mut app, "Ann", Some("Beth"), "g");
+        assert_eq!(app.mode, Mode::ReplaceAsk);
+        assert_eq!(app.textarea.selection_range(), Some(((0, 0), (0, 3))));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(app.textarea.selection_range(), Some(((0, 9), (0, 12))), "then Anne");
+        app.handle_key(key(KeyCode::Char('n')));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.lines(), ["Beth and Anne and Beth"]);
+        assert!(app.status_msg.as_deref().unwrap().contains("Replaced 2"));
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["Ann and Anne and Ann"]);
+    }
+
+    #[test]
+    fn replace_whole_words_without_asking() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Ann and Anne and Ann");
+        find_via_prompts(&mut app, "Ann", Some("Beth"), "GNW");
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.lines(), ["Beth and Anne and Beth"]);
+        // "All the rest" from the question replaces the remaining ones.
+        app.textarea.move_cursor(CursorMove::Jump(0, 0));
+        find_via_prompts(&mut app, "and", Some("&"), "");
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.textarea.lines(), ["Beth & Anne & Beth"]);
+    }
+
+    #[test]
+    fn ctrl_qp_returns_to_the_position_before_a_jump() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("one\ntwo\nthree");
+        app.textarea.move_cursor(CursorMove::Jump(1, 2));
+        chord(&mut app, 'q', 'r');
+        assert_eq!(app.textarea.cursor(), (0, 0));
+        chord(&mut app, 'q', 'p');
+        assert_eq!(app.textarea.cursor(), (1, 2));
+        chord(&mut app, 'q', 'p');
+        assert_eq!(app.textarea.cursor(), (0, 0), "and back again");
+    }
+
     #[test]
     fn replace_all_is_undone_by_a_single_undo() {
         let mut app = App::new(None).unwrap();
         app.textarea.insert_str("Ann met Anne.\nAnn left.");
         app.textarea.move_cursor(CursorMove::Jump(1, 3));
-        app.replace_all("Ann", "Beth");
+        app.replace_all(&literal("Ann"), "Beth");
         assert_eq!(app.textarea.lines(), ["Beth met Bethe.", "Beth left."]);
         assert_eq!(app.textarea.cursor(), (1, 3), "cursor stays put");
         commands::execute(&mut app, commands::Command::Undo);
@@ -3375,7 +3857,7 @@ mod tests {
     fn replace_with_nothing_is_undone_by_a_single_undo() {
         let mut app = App::new(None).unwrap();
         type_str(&mut app, "ab");
-        app.replace_all("b", "");
+        app.replace_all(&literal("b"), "");
         assert_eq!(app.textarea.lines(), ["a"]);
         commands::execute(&mut app, commands::Command::Undo);
         assert_eq!(app.textarea.lines(), ["ab"], "one undo, not two");

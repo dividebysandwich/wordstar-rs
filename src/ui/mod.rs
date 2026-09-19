@@ -68,6 +68,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Info => info_overlay(frame, area, app),
         Mode::Header => header_overlay(frame, area, app),
         Mode::Calculator => calc_overlay(frame, area, app),
+        // The question is on the status line; the match stays in view.
+        Mode::ReplaceAsk => {}
     }
 }
 
@@ -272,8 +274,13 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// The single-line prompt: label, the input with its cursor (a suggested
+/// default shows highlighted, as typing replaces it), and an optional hint line.
 fn prompt_overlay(frame: &mut Frame, area: Rect, app: &App) {
-    let rect = centered(area, 56, 3);
+    let p = &app.prompt;
+    let hint_w = p.hint.chars().count() as u16;
+    let height = if p.hint.is_empty() { 3 } else { 4 };
+    let rect = centered(area, 56.max(hint_w + 2), height);
     frame.render_widget(Clear, rect);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -282,15 +289,40 @@ fn prompt_overlay(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let line = Line::from(vec![
-        Span::styled(
-            format!("{} ", app.prompt.label),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(app.prompt.input.clone()),
-        Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme::status_bar()), inner);
+    // Scroll long input so the cursor stays visible.
+    let label = format!("{} ", p.label);
+    let room = (inner.width as usize).saturating_sub(label.chars().count() + 1).max(1);
+    let chars: Vec<char> = p.input.chars().collect();
+    let cursor = p.cursor.min(chars.len());
+    let first = (cursor + 1).saturating_sub(room);
+    let shown: String = chars[first..].iter().take(room).collect();
+    let (before, rest): (String, String) = {
+        let split = cursor - first;
+        (shown.chars().take(split).collect(), shown.chars().skip(split).collect())
+    };
+    let mut at: String = rest.chars().take(1).collect();
+    let after: String = rest.chars().skip(1).collect();
+    if at.is_empty() {
+        at.push(' ');
+    }
+    let text_style = if p.fresh {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(before, text_style),
+        Span::styled(at, Style::default().add_modifier(Modifier::REVERSED | Modifier::SLOW_BLINK)),
+        Span::styled(after, text_style),
+    ])];
+    if !p.hint.is_empty() {
+        lines.push(Line::from(Span::styled(
+            p.hint,
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).style(theme::status_bar()), inner);
 }
 
 fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {

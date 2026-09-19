@@ -91,6 +91,7 @@ static EDIT: &[MenuItem] = &[
     item("Find and Replace...", "^QA", Command::Replace),
     item("Next Find", "^L", Command::FindNext),
     item("Go to Page...", "^QI", Command::GoToPage),
+    item("Previous Position", "^QP", Command::PreviousPosition),
     item("Go to Block Begin", "^QB", Command::GotoBlockBegin),
     item("Go to Block End", "^QK", Command::GotoBlockEnd),
 ];
