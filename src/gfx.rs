@@ -341,9 +341,8 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                 &bold,
                 heading_px(*level),
                 Family::SansSerif,
-                0.0,
+                if centered { Placement::Center } else { Placement::Left(0.0) },
                 HEADING,
-                centered,
             )
         }
         Block::Para { segs, indent } => {
@@ -355,7 +354,8 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                 // A first-line indent of about one em.
                 first.text.insert_str(0, "\u{A0}\u{A0}\u{A0}\u{A0}");
             }
-            text_strip(fs, cache, &segs, BODY, Family::SansSerif, 0.0, TEXT, centered)
+            let place = if centered { Placement::Center } else { Placement::Left(0.0) };
+            text_strip(fs, cache, &segs, BODY, Family::SansSerif, place, TEXT)
         }
         Block::Item {
             depth,
@@ -365,11 +365,11 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             let indent = (*depth as f32) * 28.0;
             let mut all = vec![Seg::plain(marker.clone())];
             all.extend(segs.iter().cloned());
-            text_strip(fs, cache, &all, BODY, Family::SansSerif, indent, TEXT, false)
+            text_strip(fs, cache, &all, BODY, Family::SansSerif, Placement::Left(indent), TEXT)
         }
         Block::Code(lines) => {
             let seg = Seg::plain(lines.join("\n"));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, CODE, false)
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, Placement::Left(0.0), CODE)
         }
         Block::Quote(segs) => {
             let italic: Vec<Seg> = segs
@@ -379,30 +379,41 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                     ..s.clone()
                 })
                 .collect();
-            text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE, false)
+            text_strip(fs, cache, &italic, BODY, Family::Serif, Placement::Left(28.0), QUOTE)
         }
         Block::Rule => rule_strip(),
         // Handled by the job before a strip is built; nothing to draw.
         Block::PageBreak => RgbaImage::from_pixel(1, 1, Rgba(PAPER)),
         Block::Table { header, rows } => {
             let seg = Seg::plain(ascii_table(header, rows));
-            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT, false)
+            text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, Placement::Left(0.0), TEXT)
         }
     }
 }
 
-/// Render `segs` into a strip of width `CONTENT_W`, the text indented by
-/// `indent` (or `center`ed).
+/// Where a strip's text sits across the page.
+#[derive(Clone, Copy)]
+enum Placement {
+    /// Left-aligned, indented this far.
+    Left(f32),
+    /// Each line centered.
+    Center,
+}
+
+/// Render `segs` into a strip of width `CONTENT_W`, placed per `placement`.
 fn text_strip(
     fs: &mut FontSystem,
     cache: &mut SwashCache,
     segs: &[Seg],
     size: f32,
     family: Family<'static>,
-    indent: f32,
+    placement: Placement,
     color: [u8; 3],
-    center: bool,
 ) -> RgbaImage {
+    let (indent, center) = match placement {
+        Placement::Left(indent) => (indent, false),
+        Placement::Center => (0.0, true),
+    };
     let mut buffer = text_buffer(fs, segs, size, family, CONTENT_W - indent, center);
     let h = buffer
         .layout_runs()
