@@ -109,6 +109,17 @@ size: 12
 Your manuscript begins here…
 ```
 
+The same block holds a few options for the preview and the PDF:
+
+| Setting | Effect |
+| ------- | ------ |
+| `paragraphs: lines` | Type the WordStar way: every line you end with **Enter** is its own paragraph, and a Tab or spaces at its start are just an indent. Paragraphs are printed book-style, indented with no gap between them. (Without it, the file is standard Markdown: paragraphs are separated by a blank line, and an indented line after a blank one is a code block.) |
+| `smart: false` | Turn off typographic punctuation. By default `"quotes"` and `'apostrophes'` print curly, `--` and `---` become en and em dashes, and `...` an ellipsis. |
+| `paper: letter` | Print on US Letter instead of A4 (`paper: a4`). |
+| `format: manuscript` | Export in standard manuscript format — see *Exporting to PDF*. |
+
+A line holding just `#` is a scene break, as in a typed manuscript.
+
 ### Seeing it formatted
 
 Press **F5** for a read-only **Preview**: the document is rendered with the
@@ -309,10 +320,22 @@ pages (↑/↓), and press **Enter**. These are stored as WordStar **dot command
 at the top of the document (`.he`/`.oh`/`.eh` for headers, `.fo`/`.of`/`.ef` for
 footers); **Page Break** and **Column Break** insert `.pa` and `.cb`.
 
-Dot commands are print directives, not body text, so they are shown as plain
-lines while editing but are **omitted from the preview, the `^OD` clean view, and
-PDF export** — they don't appear as literal `.he …` text in your formatted
-output.
+Dot commands are print directives, not body text: while editing they are plain
+lines (marked `.` in the flag column), and in the preview and the PDF they take
+effect instead of appearing as text:
+
+| Dot command | Effect |
+| ----------- | ------ |
+| `.pa` | Start a new page (the `^OD` view shows a *page break* line) |
+| `.he` / `.oh` / `.eh` *text* | Header on every / odd / even page |
+| `.fo` / `.of` / `.ef` *text* | Footer on every / odd / even page (replaces the page number) |
+| `.op` | Omit page numbers |
+| `.pn` *n* | Number the first page *n* |
+| `.rm` *n* | Right margin: wrap text at column *n* (`^OR` sets it) |
+
+In header and footer text, `#` prints the page number: `.fo Page #` gives
+"Page 1", "Page 2", and so on. Original WordStar files keep these dot commands
+when imported.
 
 ---
 
@@ -389,12 +412,49 @@ output file name, pre-filled with a sensible default (`chapter1.md` →
 If the chosen file already exists, a confirmation box appears first — press
 **Y** to overwrite or **N** (or **Esc**) to back out without touching it.
 
-The PDF is laid out on A4 pages with page numbers, and renders your formatting:
-headings, **bold**, *italic*, lists (bulleted, numbered, and task lists), block
-quotes, code blocks, and tables. It is typeset in the Courier family — a
-fixed-pitch, typewriter look in keeping with WordStar's manuscript heritage, and
-one that needs no bundled fonts. Text is limited to the Latin-1 / Windows-1252
-character set; anything outside it is shown as `?`.
+The PDF is laid out on A4 pages (or US Letter, with `paper: letter`) with page
+numbers, your headers and footers, and page breaks where you put `.pa`. It
+renders your formatting: headings, **bold**, *italic*, lists (bulleted,
+numbered, and task lists), block quotes, code blocks, tables, and line breaks
+you forced inside a paragraph (end a line with `\` — for verse or letters). It
+is typeset in the Courier family — a fixed-pitch, typewriter look in keeping
+with WordStar's manuscript heritage, and one that needs no bundled fonts. Text
+is limited to the Latin-1 / Windows-1252 character set (which includes curly
+quotes and dashes); anything outside it is shown as `?`.
+
+### Standard manuscript format
+
+Magazines, agents and publishers ask for fiction in *standard manuscript
+format*. Choose **Insert → Manuscript Setup** and fill in the lines it adds at
+the top of your document:
+
+```markdown
+---
+format: manuscript
+title: The Red House
+author: Jane Q. Writer        # your legal name, for the contact block
+byline: J. Q. Writer          # the name to publish under (optional)
+contact:
+  - 12 Elm Street, Springfield
+  - jane@example.com
+paper: letter
+paragraphs: lines
+---
+```
+
+`^KP` then exports the manuscript the way editors expect it: 12-point Courier,
+double-spaced, one-inch margins, and every paragraph indented half an inch with
+no blank lines between them. Page one has your name and contact details in the
+top left, the word count rounded to the nearest hundred ("about 4,300 words")
+in the top right, and the title and byline halfway down, where the story
+begins. Every later page carries the header `Surname / TITLE / page`. Scene
+breaks (`#` or `***`) print as a centered `#`, each `#` chapter heading starts a
+new page a third of the way down, and `END` marks the finish. Add
+`italics: underline` for the older convention of underlining italics. (The
+on-screen preview keeps its usual look; the layout applies to the PDF.)
+
+The **Word Count** (`^K?`) counts what a reader would see, leaving out the
+frontmatter, dot commands, and Markdown markup.
 
 ## File format
 

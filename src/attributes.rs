@@ -82,6 +82,10 @@ pub fn line_attributes(line: &str) -> Vec<RunAttributes> {
 pub const UNDERLINE_START: char = '\u{E000}';
 pub const UNDERLINE_END: char = '\u{E001}';
 
+/// Private-use sentinel standing alone in a paragraph where a `.pa` page break
+/// was; the renderers turn that paragraph into a new page.
+pub const PAGE_BREAK: char = '\u{E002}';
+
 /// True if `line` is a WordStar dot command (a `.` at column 1 followed by a
 /// letter, e.g. `.he`, `.pa`). Such lines are print directives, not body text.
 pub fn is_dot_command(line: &str) -> bool {
@@ -89,28 +93,395 @@ pub fn is_dot_command(line: &str) -> bool {
     chars.next() == Some('.') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
 }
 
-/// Preprocess raw Markdown for the formatted renderers: drop dot-command lines,
-/// and rewrite pandoc attribute spans so the renderers can show them.
+/// The name of a dot command, lowercased (`.HE Title` → `he`), and its argument.
+fn dot_command(line: &str) -> Option<(String, &str)> {
+    if !is_dot_command(line) {
+        return None;
+    }
+    let body = &line[1..];
+    let split = body
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(body.len());
+    Some((body[..split].to_ascii_lowercase(), body[split..].trim()))
+}
+
+/// Preprocess raw Markdown (frontmatter already stripped) for the formatted
+/// renderers: handle dot commands, apply the paragraph mode, and rewrite pandoc
+/// attribute spans so the renderers can show them.
 ///
-/// `[text]{.underline}` becomes `text` wrapped in [`UNDERLINE_START`] /
-/// [`UNDERLINE_END`] sentinels (turned into a real underline downstream).
-/// `[text]{font=… size=…}` collapses to its visible `text` — terminals and the
-/// monospaced PDF can't change font, but the markers must not leak as literals.
-/// Strikethrough (`~~…~~`) is standard Markdown and passes through untouched.
-pub fn prepare_render_source(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut first = true;
+/// - `.pa` becomes a paragraph holding only [`PAGE_BREAK`]; other dot commands
+///   are print directives and are dropped (see [`page_setup`]).
+/// - A line that is just `#` is a manuscript scene break and becomes a rule
+///   (on its own it would be an empty heading).
+/// - With `paragraphs: lines`, every line of prose is its own paragraph and
+///   leading indentation is dropped (it would otherwise make a code block).
+/// - `[text]{.underline}` becomes `text` wrapped in [`UNDERLINE_START`] /
+///   [`UNDERLINE_END`] sentinels (turned into a real underline downstream).
+///   `[text]{font=… size=…}` collapses to its visible `text` — terminals and the
+///   monospaced PDF can't change font, but the markers must not leak as literals.
+///   Strikethrough (`~~…~~`) is standard Markdown and passes through untouched.
+pub fn prepare_render_source(src: &str, opts: &RenderOptions) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut fence: Option<&str> = None;
     for line in src.lines() {
-        if is_dot_command(line) {
+        let trimmed = line.trim_start();
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+            }
+            out.push(line.to_string());
             continue;
         }
-        if !first {
-            out.push('\n');
+        if let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m)) {
+            fence = Some(marker);
+            out.push(line.to_string());
+            continue;
         }
-        first = false;
-        rewrite_spans(line, &mut out);
+        if let Some((name, _)) = dot_command(line) {
+            if name == "pa" {
+                out.extend([String::new(), PAGE_BREAK.to_string(), String::new()]);
+            }
+            continue;
+        }
+        if line.trim() == "#" {
+            out.extend([String::new(), "* * *".to_string(), String::new()]);
+            continue;
+        }
+        let mut rewritten = String::with_capacity(line.len());
+        if opts.prose_paragraphs && !is_structural(line) {
+            rewrite_spans(trimmed, &mut rewritten);
+            out.extend([String::new(), rewritten, String::new()]);
+        } else {
+            rewrite_spans(line, &mut rewritten);
+            out.push(rewritten);
+        }
+    }
+    out.join("\n")
+}
+
+/// True for a line that is Markdown structure rather than prose: blank, a
+/// heading, quote, list item, table row, or thematic break.
+fn is_structural(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') || t.starts_with('>') || t.starts_with('|') {
+        return true;
+    }
+    if ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m)) {
+        return true;
+    }
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && (t[digits..].starts_with(". ") || t[digits..].starts_with(") ")) {
+        return true;
+    }
+    is_thematic_break(t)
+}
+
+/// A Markdown thematic break (`---`, `***`, `* * *`, `___`): three or more of
+/// the same marker, optionally spaced.
+fn is_thematic_break(line: &str) -> bool {
+    let t: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    t.len() >= 3
+        && ["-", "*", "_"]
+            .iter()
+            .any(|m| t.chars().all(|c| c.to_string() == *m))
+}
+
+/// Drop a leading YAML frontmatter block (`--- … ---`) so it is not rendered.
+pub fn strip_frontmatter(src: &str) -> &str {
+    let mut lines = src.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return src;
+    }
+    let mut offset = src.find('\n').map_or(src.len(), |i| i + 1);
+    for line in lines {
+        offset += line.len() + 1;
+        if line.trim() == "---" {
+            return src.get(offset..).unwrap_or("");
+        }
+    }
+    src
+}
+
+/// The YAML frontmatter as `(key, values)` pairs, keys lowercased. Supports the
+/// subset documents need: `key: value`, a key followed by `- item` lines,
+/// quoted values, and `# comments`.
+fn frontmatter(src: &str) -> Vec<(String, Vec<String>)> {
+    let mut lines = src.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Vec::new();
+    }
+    let unquote = |v: &str| {
+        let v = v.trim();
+        for q in ['"', '\''] {
+            if let Some(rest) = v.strip_prefix(q) {
+                return rest.split(q).next().unwrap_or("").to_string();
+            }
+        }
+        let v = if v.starts_with('#') { "" } else { v };
+        v.split(" #").next().unwrap_or("").trim().to_string()
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for line in lines {
+        let t = line.trim();
+        if t == "---" {
+            break;
+        }
+        if let Some(item) = t.strip_prefix("- ").or_else(|| (t == "-").then_some("")) {
+            if let Some((_, values)) = out.last_mut() {
+                values.push(unquote(item));
+            }
+        } else if let Some((key, value)) = t.split_once(':') {
+            let value = unquote(value);
+            let values = if value.is_empty() { Vec::new() } else { vec![value] };
+            out.push((key.trim().to_ascii_lowercase(), values));
+        }
     }
     out
+}
+
+/// Paper size for the PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paper {
+    A4,
+    Letter,
+}
+
+/// The author details for a standard-manuscript-format PDF (`format:
+/// manuscript` in the frontmatter).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Manuscript {
+    pub title: String,
+    /// The author's legal name (for the contact block).
+    pub author: String,
+    /// The name the story is published under ("by …").
+    pub byline: String,
+    /// Surname for the running page header.
+    pub surname: String,
+    /// Contact block lines (address, email, …), printed under the author.
+    pub contact: Vec<String>,
+    /// `italics: underline` — the classic convention of underlining instead.
+    pub underline_italics: bool,
+}
+
+/// Document-level rendering options, read from the YAML frontmatter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderOptions {
+    /// `paragraphs: lines` — each line of prose is its own paragraph (the way
+    /// WordStar writers type: one Enter per paragraph, maybe a Tab indent), and
+    /// paragraphs after the first get a first-line indent instead of a gap.
+    pub prose_paragraphs: bool,
+    /// Curly quotes, en/em dashes and ellipses (`smart: false` turns it off).
+    pub smart: bool,
+    /// Standard manuscript format, when `format: manuscript`.
+    pub manuscript: Option<Manuscript>,
+    /// `paper: letter` / `paper: a4`; `None` uses the format's default.
+    pub paper: Option<Paper>,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self {
+            prose_paragraphs: false,
+            smart: true,
+            manuscript: None,
+            paper: None,
+        }
+    }
+}
+
+/// Read the rendering options from the document's frontmatter.
+pub fn render_options(src: &str) -> RenderOptions {
+    let fm = frontmatter(src);
+    let get = |key: &str| {
+        fm.iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.first())
+            .map(|v| v.to_ascii_lowercase())
+    };
+    let text = |key: &str| {
+        fm.iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.first())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let manuscript = (get("format").as_deref() == Some("manuscript")).then(|| {
+        let author = text("author");
+        let byline = Some(text("byline"))
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| author.clone());
+        let surname = Some(text("surname"))
+            .filter(|s| !s.is_empty())
+            .or_else(|| author.split_whitespace().last().map(str::to_string))
+            .unwrap_or_default();
+        Manuscript {
+            title: text("title"),
+            author,
+            byline,
+            surname,
+            contact: fm
+                .iter()
+                .find(|(k, _)| k == "contact")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+            underline_italics: get("italics").as_deref() == Some("underline"),
+        }
+    });
+    RenderOptions {
+        prose_paragraphs: get("paragraphs").as_deref() == Some("lines"),
+        smart: !matches!(get("smart").as_deref(), Some("false" | "no" | "off")),
+        manuscript,
+        paper: match get("paper").as_deref() {
+            Some("letter" | "us-letter" | "usletter") => Some(Paper::Letter),
+            Some("a4") => Some(Paper::A4),
+            _ => None,
+        },
+    }
+}
+
+/// Running headers / footers and page numbering, from WordStar dot commands:
+/// `.he`/`.oh`/`.eh` (header on all / odd / even pages), `.fo`/`.of`/`.ef`
+/// (footers), `.op` (omit page numbers) and `.pn N` (first page number). In the
+/// text, `#` stands for the page number. The first of each command wins, which
+/// is the most recent one the Header/Footer dialog inserted (it adds at the top).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageSetup {
+    pub header_odd: Option<String>,
+    pub header_even: Option<String>,
+    pub footer_odd: Option<String>,
+    pub footer_even: Option<String>,
+    pub omit_page_numbers: bool,
+    pub first_page: usize,
+}
+
+impl Default for PageSetup {
+    fn default() -> Self {
+        Self {
+            header_odd: None,
+            header_even: None,
+            footer_odd: None,
+            footer_even: None,
+            omit_page_numbers: false,
+            first_page: 1,
+        }
+    }
+}
+
+impl PageSetup {
+    /// The header for printed page number `page`, with `#` filled in.
+    pub fn header(&self, page: usize) -> Option<String> {
+        let text = if page % 2 == 1 { &self.header_odd } else { &self.header_even };
+        text.as_ref().map(|t| t.replace('#', &page.to_string()))
+    }
+
+    /// The footer for printed page number `page`, with `#` filled in.
+    pub fn footer(&self, page: usize) -> Option<String> {
+        let text = if page % 2 == 1 { &self.footer_odd } else { &self.footer_even };
+        text.as_ref().map(|t| t.replace('#', &page.to_string()))
+    }
+}
+
+/// Collect the page setup from the document's dot commands.
+pub fn page_setup(src: &str) -> PageSetup {
+    let mut setup = PageSetup::default();
+    let mut first_page = None;
+    for line in src.lines() {
+        let Some((name, arg)) = dot_command(line) else {
+            continue;
+        };
+        let text = || Some(arg.to_string());
+        let set = |slot: &mut Option<String>| {
+            if slot.is_none() {
+                *slot = text();
+            }
+        };
+        match name.as_str() {
+            "he" => {
+                set(&mut setup.header_odd);
+                set(&mut setup.header_even);
+            }
+            "oh" => set(&mut setup.header_odd),
+            "eh" => set(&mut setup.header_even),
+            "fo" => {
+                set(&mut setup.footer_odd);
+                set(&mut setup.footer_even);
+            }
+            "of" => set(&mut setup.footer_odd),
+            "ef" => set(&mut setup.footer_even),
+            "op" => setup.omit_page_numbers = true,
+            "pn" if first_page.is_none() => first_page = arg.parse().ok(),
+            _ => {}
+        }
+    }
+    setup.first_page = first_page.unwrap_or(1).max(1);
+    setup
+}
+
+/// Document statistics for the Word Count dialog and the manuscript title page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextStats {
+    pub words: usize,
+    pub chars: usize,
+    pub paragraphs: usize,
+}
+
+/// Count the words, characters and paragraphs a reader would see: frontmatter,
+/// dot commands, Markdown structure (heading `#`, quote `>`, list markers, rules,
+/// table rules, code fences) and inline formatting markers are left out, and
+/// only tokens with a letter or digit count as words (not a spaced `—`).
+pub fn count_words(lines: &[String]) -> TextStats {
+    let mut stats = TextStats::default();
+    let mut in_para = false;
+    let mut body = lines;
+    if lines.first().map(|l| l.trim()) == Some("---")
+        && let Some(end) = lines.iter().skip(1).position(|l| l.trim() == "---")
+    {
+        body = &lines[end + 2..];
+    }
+    for line in body {
+        let t = line.trim();
+        if is_dot_command(line)
+            || t.starts_with("```")
+            || t.starts_with("~~~")
+            || is_thematic_break(t)
+            || t == "#"
+            || (t.starts_with('|') && t.chars().all(|c| "|-: ".contains(c)))
+        {
+            in_para = false;
+            continue;
+        }
+        let mut rest = t.trim_start_matches('#').trim_start();
+        while let Some(r) = rest.strip_prefix('>') {
+            rest = r.trim_start();
+        }
+        for marker in ["- [ ] ", "- [x] ", "- [X] ", "- ", "* ", "+ "] {
+            if let Some(r) = rest.strip_prefix(marker) {
+                rest = r;
+                break;
+            }
+        }
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0
+            && let Some(r) = rest[digits..]
+                .strip_prefix(". ")
+                .or_else(|| rest[digits..].strip_prefix(") "))
+        {
+            rest = r;
+        }
+        let text = strip_inline_markers(&rest.replace('|', " "));
+        stats.words += text
+            .split_whitespace()
+            .filter(|w| w.chars().any(char::is_alphanumeric))
+            .count();
+        stats.chars += text.chars().count();
+        if text.trim().is_empty() {
+            in_para = false;
+        } else if !in_para {
+            stats.paragraphs += 1;
+            in_para = true;
+        }
+    }
+    stats
 }
 
 /// Append `line` to `out`, rewriting any `[text]{attrs}` attribute spans.
@@ -318,9 +689,13 @@ mod tests {
         line_attributes(line)[col].clone()
     }
 
+    fn prepare(src: &str) -> String {
+        prepare_render_source(src, &RenderOptions::default())
+    }
+
     #[test]
     fn prepare_wraps_underline_and_strips_font() {
-        let out = prepare_render_source("a [hi]{.underline} b [yo]{font=\"Courier\"} c");
+        let out = prepare("a [hi]{.underline} b [yo]{font=\"Courier\"} c");
         // Underline span: text kept, wrapped in sentinels; brackets/attrs gone.
         assert!(
             out.contains(&format!("{UNDERLINE_START}hi{UNDERLINE_END}")),
@@ -334,16 +709,17 @@ mod tests {
 
     #[test]
     fn prepare_drops_dot_command_lines() {
-        let out = prepare_render_source(".he Title\nBody\n.pa\nMore");
+        let out = prepare(".he Title\nBody\n.pa\nMore");
         assert!(!out.contains("Title"), "dot command leaked: {out:?}");
         assert!(!out.contains(".pa"), "dot command leaked: {out:?}");
         assert!(out.contains("Body") && out.contains("More"));
+        assert!(out.contains(&format!("\n\n{PAGE_BREAK}\n\n")), "page break: {out:?}");
     }
 
     #[test]
     fn prepare_leaves_links_untouched() {
         // `[text](url)` is a real link, not an attribute span.
-        let out = prepare_render_source("see [the site](https://example.com)");
+        let out = prepare("see [the site](https://example.com)");
         assert_eq!(out, "see [the site](https://example.com)");
     }
 
@@ -391,6 +767,64 @@ mod tests {
         assert_eq!(visible_column("[hi]{.underline}", 3), 2);
         // end of "x*y*z" (raw 5) → visible 3 (x, y, z)
         assert_eq!(visible_column("x*y*z", 5), 3);
+    }
+
+    #[test]
+    fn prose_mode_makes_each_line_a_paragraph_without_code_blocks() {
+        let opts = RenderOptions {
+            prose_paragraphs: true,
+            ..RenderOptions::default()
+        };
+        let out = prepare_render_source("First.\n\tSecond, indented.\n- a list\n```\n  code\n```", &opts);
+        assert!(out.contains("\n\nSecond, indented.\n"), "got {out:?}");
+        assert!(!out.contains("\tSecond"), "indent would make a code block");
+        assert!(out.contains("- a list"));
+        assert!(out.contains("  code"), "fenced code left alone");
+    }
+
+    #[test]
+    fn lone_hash_line_is_a_scene_break() {
+        assert!(prepare("one\n#\ntwo").contains("\n* * *\n"));
+    }
+
+    #[test]
+    fn render_options_read_frontmatter() {
+        let src = "---\nformat: manuscript\ntitle: \"The Red House\"\nauthor: Jane Q. Writer  # legal name\ncontact:\n  - 1 Elm St\n  - jane@example.com\nparagraphs: lines\nsmart: false\npaper: a4\n---\nBody";
+        let o = render_options(src);
+        assert!(o.prose_paragraphs);
+        assert!(!o.smart);
+        assert_eq!(o.paper, Some(Paper::A4));
+        let m = o.manuscript.unwrap();
+        assert_eq!(m.title, "The Red House");
+        assert_eq!((m.byline.as_str(), m.surname.as_str()), ("Jane Q. Writer", "Writer"));
+        assert_eq!(m.contact, ["1 Elm St", "jane@example.com"]);
+        assert_eq!(strip_frontmatter(src), "Body");
+        assert_eq!(render_options("Body"), RenderOptions::default());
+    }
+
+    #[test]
+    fn page_setup_reads_header_footer_dot_commands() {
+        let s = page_setup(".OH Odd #\n.eh Even #\n.fo - # -\n.pn 5\n.he later\nBody");
+        assert_eq!(s.header(1).as_deref(), Some("Odd 1"));
+        assert_eq!(s.header(2).as_deref(), Some("Even 2"));
+        assert_eq!(s.footer(7).as_deref(), Some("- 7 -"));
+        assert_eq!(s.first_page, 5);
+        assert!(!s.omit_page_numbers);
+        assert!(page_setup(".op").omit_page_numbers);
+    }
+
+    #[test]
+    fn word_count_skips_structure() {
+        let lines: Vec<String> = [
+            "---", "title: Not Counted", "---", "# Chapter One", "", "- item one",
+            "> quoted text", "***", ".pa", "She paused — then **left**.", "| a | b |", "|---|---|",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let s = count_words(&lines);
+        // Chapter One (2) + item one (2) + quoted text (2) + She paused then left (4) + a b (2)
+        assert_eq!(s.words, 12);
     }
 
     #[test]

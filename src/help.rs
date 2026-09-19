@@ -70,7 +70,8 @@ pub fn lines() -> Vec<Line<'static>> {
         ".pa / .cb",
         "Page break / column break (Insert menu)",
     );
-    row(&mut out, "Layout menu", "Header / footer lines");
+    row(&mut out, "Layout menu", "Header / footer lines (.he / .fo)");
+    row(&mut out, "Insert menu", "Manuscript Setup (standard manuscript PDF)");
     row(&mut out, "^QI", "Go to page");
 
     head(&mut out, "Editing");

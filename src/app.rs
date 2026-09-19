@@ -1988,38 +1988,89 @@ impl App {
         self.set_status(format!("{what} set: {line}"));
     }
 
-    /// Show document statistics in an info modal (^K?).
+    /// Show document statistics in an info modal (^K?). Only the text a reader
+    /// sees counts: not the frontmatter, dot commands or Markdown markup.
     pub fn show_word_count(&mut self) {
-        let mut words = 0usize;
-        let mut chars = 0usize;
-        let mut paragraphs = 0usize;
-        let mut in_para = false;
         let lines = self.textarea.lines();
-        for line in lines {
-            if crate::attributes::is_dot_command(line) {
-                continue;
-            }
-            let text = crate::attributes::strip_inline_markers(line);
-            let n = text.split_whitespace().count();
-            words += n;
-            chars += text.chars().count();
-            if text.trim().is_empty() {
-                in_para = false;
-            } else if !in_para {
-                paragraphs += 1;
-                in_para = true;
-            }
-        }
+        let stats = crate::attributes::count_words(lines);
         self.info = Some(InfoState {
             title: "Word Count".into(),
             lines: vec![
-                format!("Words:       {words}"),
-                format!("Characters:  {chars}"),
+                format!("Words:       {}", stats.words),
+                format!("Characters:  {}", stats.chars),
                 format!("Lines:       {}", lines.len()),
-                format!("Paragraphs:  {paragraphs}"),
+                format!("Paragraphs:  {}", stats.paragraphs),
             ],
         });
         self.mode = Mode::Info;
+    }
+
+    /// Insert ▸ Manuscript Setup: add the frontmatter that turns on standard
+    /// manuscript format for PDF export, with placeholders to fill in. Keys the
+    /// document already sets are left alone.
+    pub fn insert_manuscript_template(&mut self) {
+        const TEMPLATE: &[&str] = &[
+            "format: manuscript",
+            "title: Untitled",
+            "author: Your Legal Name",
+            "byline: Your Pen Name",
+            "contact:",
+            "  - Street Address",
+            "  - City, State ZIP",
+            "  - you@example.com",
+            "paper: letter",
+            "paragraphs: lines",
+        ];
+        let lines = self.textarea.lines();
+        let has_frontmatter = lines.first().map(|l| l.trim()) == Some("---")
+            && lines.iter().skip(1).any(|l| l.trim() == "---");
+        if crate::attributes::render_options(&lines.join("\n"))
+            .manuscript
+            .is_some()
+        {
+            self.textarea.move_cursor(CursorMove::Top);
+            self.set_status("Manuscript format is already set up — see the lines at the top.");
+            return;
+        }
+        let existing: Vec<String> = if has_frontmatter {
+            lines
+                .iter()
+                .skip(1)
+                .take_while(|l| l.trim() != "---")
+                .filter_map(|l| l.split_once(':').map(|(k, _)| k.trim().to_ascii_lowercase()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Skip keys (and a skipped key's list items) the document already has.
+        let mut block = Vec::new();
+        let mut skipping = false;
+        for line in TEMPLATE {
+            if let Some((key, _)) = line.split_once(':') {
+                skipping = existing.iter().any(|k| k == key);
+            }
+            if !skipping {
+                block.push(*line);
+            }
+        }
+        self.clear_marking();
+        self.textarea.move_cursor(CursorMove::Top);
+        self.textarea.move_cursor(CursorMove::Head);
+        let text = if has_frontmatter {
+            // Insert after the opening `---`.
+            self.textarea.move_cursor(CursorMove::Down);
+            format!("{}\n", block.join("\n"))
+        } else {
+            format!("---\n{}\n---\n\n", block.join("\n"))
+        };
+        self.textarea.insert_str(text);
+        self.modified = true;
+        // Put the cursor on the title, the first thing to fill in.
+        if let Some(row) = self.textarea.lines().iter().position(|l| l.starts_with("title: ")) {
+            let len = self.textarea.lines()[row].chars().count();
+            self.textarea.move_cursor(jump((row, len)));
+        }
+        self.set_status("Manuscript format on: fill in your details, then export with ^KP.");
     }
 
     fn handle_info_key(&mut self, _key: KeyEvent) {
@@ -2244,10 +2295,17 @@ impl App {
             Some(p) => p.with_extension("pdf"),
             None => PathBuf::from("untitled.pdf"),
         };
+        let manuscript = crate::attributes::render_options(&self.textarea.lines().join("\n"))
+            .manuscript
+            .is_some();
         self.mode = Mode::Prompt;
         self.prompt = PromptState {
             kind: PromptKind::ExportPdf,
-            label: "Export PDF as:".into(),
+            label: if manuscript {
+                "Export manuscript PDF as:".into()
+            } else {
+                "Export PDF as:".into()
+            },
             input: default.to_string_lossy().into_owned(),
             pending_find: None,
         };
@@ -3350,6 +3408,17 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_q_r_and_c_go_to_the_very_start_and_end() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("first line\nlast line");
+        app.textarea.move_cursor(CursorMove::Jump(1, 3));
+        chord(&mut app, 'q', 'c');
+        assert_eq!(app.textarea.cursor(), (1, 9));
+        chord(&mut app, 'q', 'r');
+        assert_eq!(app.textarea.cursor(), (0, 0));
+    }
+
+    #[test]
     fn ctrl_n_splits_the_line_but_leaves_the_cursor_in_place() {
         let mut app = App::new(None).unwrap();
         app.textarea.insert_str("helloworld");
@@ -3481,6 +3550,36 @@ mod tests {
         app.mode = Mode::Editor;
         app.handle_paste("a\r\nb".into());
         assert_eq!(app.textarea.lines(), ["a", "b"]);
+    }
+
+    #[test]
+    fn manuscript_setup_adds_frontmatter_once() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Once upon a time.");
+        commands::execute(&mut app, commands::Command::ManuscriptTemplate);
+        let text = app.textarea.lines().join("\n");
+        assert!(text.starts_with("---\nformat: manuscript\ntitle: Untitled"), "{text}");
+        assert!(text.ends_with("---\n\nOnce upon a time."), "{text}");
+        assert!(app.textarea.lines()[app.textarea.cursor().0].starts_with("title: "));
+        app.start_export_pdf();
+        assert_eq!(app.prompt.label, "Export manuscript PDF as:");
+        // Running it again changes nothing.
+        app.mode = Mode::Editor;
+        commands::execute(&mut app, commands::Command::ManuscriptTemplate);
+        assert_eq!(app.textarea.lines().join("\n"), text);
+    }
+
+    #[test]
+    fn manuscript_setup_keeps_existing_frontmatter_keys() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("---\ntitle: The Red House\nfont: Courier\n---\nBody");
+        app.insert_manuscript_template();
+        let lines = app.textarea.lines();
+        assert_eq!(lines.iter().filter(|l| l.starts_with("title:")).count(), 1);
+        assert!(lines.contains(&"title: The Red House".to_string()));
+        assert!(lines.contains(&"format: manuscript".to_string()));
+        assert!(lines.contains(&"font: Courier".to_string()));
+        assert_eq!(lines.iter().filter(|l| l.trim() == "---").count(), 2);
     }
 
     #[test]

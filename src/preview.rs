@@ -13,14 +13,24 @@ use ratatui::text::{Line, Span};
 
 /// Render markdown source into styled lines.
 ///
-/// The source is first run through [`crate::attributes::prepare_render_source`],
-/// which drops WordStar dot commands and rewrites pandoc attribute spans (so
-/// `[text]{.underline}` renders underlined rather than showing its markers).
+/// The YAML frontmatter is dropped, and the rest is run through
+/// [`crate::attributes::prepare_render_source`], which handles WordStar dot
+/// commands (a `.pa` shows as a page-break line), the `paragraphs: lines` mode,
+/// and rewrites pandoc attribute spans (so `[text]{.underline}` renders
+/// underlined rather than showing its markers).
 pub fn render(source: &str) -> Vec<Line<'static>> {
-    let prepared = crate::attributes::prepare_render_source(source);
-    let mut r = Renderer::default();
-    let options =
+    let opts = crate::attributes::render_options(source);
+    let body = crate::attributes::strip_frontmatter(source);
+    let prepared = crate::attributes::prepare_render_source(body, &opts);
+    let mut r = Renderer {
+        prose: opts.prose_paragraphs,
+        ..Renderer::default()
+    };
+    let mut options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    if opts.smart {
+        options |= Options::ENABLE_SMART_PUNCTUATION;
+    }
     for event in Parser::new_ext(&prepared, options) {
         r.handle(event);
     }
@@ -53,6 +63,11 @@ struct Renderer {
     link_urls: Vec<String>,
     /// Table being assembled, if inside one.
     table: Option<TableBuilder>,
+    /// `paragraphs: lines`: paragraphs that follow a paragraph are indented
+    /// rather than separated by a blank line.
+    prose: bool,
+    /// The last block finished was a paragraph (for the prose indent).
+    after_para: bool,
 }
 
 impl Renderer {
@@ -73,6 +88,7 @@ impl Renderer {
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => self.flush_line(),
             Event::Rule => {
+                self.after_para = false;
                 self.flush_line();
                 self.lines.push(Line::from(Span::styled(
                     "─".repeat(40),
@@ -85,8 +101,23 @@ impl Renderer {
     }
 
     fn start(&mut self, tag: Tag) {
+        let para_follows_para = std::mem::take(&mut self.after_para);
         match tag {
-            Tag::Paragraph => self.flush_line(),
+            Tag::Paragraph => {
+                self.flush_line();
+                if self.prose
+                    && para_follows_para
+                    && !self.in_blockquote
+                    && self.list_stack.is_empty()
+                {
+                    // Undo the blank line after the previous paragraph and
+                    // indent instead, like a printed book.
+                    if self.lines.last().is_some_and(|l| l.width() == 0) {
+                        self.lines.pop();
+                    }
+                    self.current.push(Span::raw("    "));
+                }
+            }
             Tag::Heading { level, .. } => {
                 self.flush_line();
                 self.heading = Some(level);
@@ -142,6 +173,7 @@ impl Renderer {
             TagEnd::Paragraph => {
                 self.flush_line();
                 self.lines.push(Line::default());
+                self.after_para = !self.in_blockquote && self.list_stack.is_empty();
             }
             TagEnd::Heading(_) => {
                 self.flush_line();
@@ -242,6 +274,14 @@ impl Renderer {
                     ));
                 }
             }
+            return;
+        }
+        // A `.pa` page break arrives as a paragraph holding only the sentinel.
+        if text.trim() == crate::attributes::PAGE_BREAK.to_string() {
+            self.current.push(Span::styled(
+                "──────── page break ────────",
+                Style::default().fg(Color::DarkGray),
+            ));
             return;
         }
         // Split on the underline sentinels, toggling underline between runs.
@@ -517,5 +557,24 @@ mod tests {
         assert!(out.contains("Real body text"), "body missing:\n{out}");
         assert!(!out.contains("My Header"), "dot command leaked:\n{out}");
         assert!(!out.contains(".pa"), "dot command leaked:\n{out}");
+    }
+
+    #[test]
+    fn frontmatter_is_not_shown() {
+        let out = flat(&render("---\nfont: Courier\n---\nBody text"));
+        assert!(!out.contains("font"), "frontmatter leaked:\n{out}");
+        assert!(out.contains("Body text"));
+    }
+
+    #[test]
+    fn page_break_shows_as_a_line() {
+        let out = flat(&render("One\n.pa\nTwo"));
+        assert!(out.contains("page break"), "got:\n{out}");
+    }
+
+    #[test]
+    fn prose_paragraphs_are_indented_without_blank_lines() {
+        let out = flat(&render("---\nparagraphs: lines\n---\nFirst.\nSecond."));
+        assert!(out.contains("First.\n    Second."), "got:\n{out}");
     }
 }

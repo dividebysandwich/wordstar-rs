@@ -1,11 +1,17 @@
 //! Export the document to a formatted PDF.
 //!
 //! The Markdown is parsed with `pulldown-cmark` into a list of blocks, which are
-//! then laid out onto A4 pages. We use the PDF standard Courier family (no font
+//! then laid out onto pages. We use the PDF standard Courier family (no font
 //! files to embed, and viewers know its metrics), which is monospaced — so line
 //! wrapping, table alignment and page breaks are exact, and it suits WordStar's
 //! typewriter-manuscript heritage. Bold/italic/headings come from the Courier
 //! variants and larger sizes.
+//!
+//! WordStar's print dot commands shape the pages: `.pa` starts a new page, and
+//! `.he`/`.fo` (with odd/even variants, `.op`, `.pn`) set running headers,
+//! footers and page numbering. With `format: manuscript` in the frontmatter the
+//! document is laid out in standard manuscript format instead (see
+//! [`PageStyle::manuscript`]).
 //!
 //! Built-in PDF fonts use WinAnsi encoding, so text is limited to Latin-1 plus
 //! the usual CP1252 punctuation; anything outside that is shown as `?`.
@@ -13,31 +19,116 @@
 use printpdf::*;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
-// A4 page, in PDF points (1 pt = 1/72").
-const PAGE_W: f32 = 595.276;
-const PAGE_H: f32 = 841.890;
-const MARGIN: f32 = 56.7; // ~20 mm
-const FOOTER_Y: f32 = 30.0; // page-number baseline
-const BODY: f32 = 11.0;
+use crate::attributes::{Manuscript, PAGE_BREAK, PageSetup, Paper, RenderOptions};
+pub(crate) use crate::attributes::strip_frontmatter;
+
+/// Gap added to the font size for single-spaced lines, in points.
 const LINE_GAP: f32 = 3.0;
 /// Courier advance width is exactly 600/1000 em.
 const ADVANCE: f32 = 0.6;
+/// Size of the page number and of `.he`/`.fo` lines in the standard layout.
+const MARGINALIA: f32 = 9.0;
 
 fn char_w(size: f32) -> f32 {
     size * ADVANCE
 }
 
-fn max_chars(size: f32) -> usize {
-    ((PAGE_W - 2.0 * MARGIN) / char_w(size)).floor() as usize
+/// Page size in points (1 pt = 1/72").
+fn paper_size(paper: Paper) -> (f32, f32) {
+    match paper {
+        Paper::A4 => (595.276, 841.890),
+        Paper::Letter => (612.0, 792.0),
+    }
 }
 
-fn heading_size(level: u8) -> f32 {
-    match level {
-        1 => 20.0,
-        2 => 16.0,
-        3 => 14.0,
-        4 => 12.0,
-        _ => BODY,
+/// Page geometry and typography for a layout, in PDF points.
+#[derive(Debug, Clone)]
+struct PageStyle {
+    w: f32,
+    h: f32,
+    margin_x: f32,
+    margin_top: f32,
+    /// Body text stops when its baseline would fall below this height.
+    bottom_limit: f32,
+    body: f32,
+    double_spaced: bool,
+    /// Space after each block, as a fraction of a body line.
+    block_gap: f32,
+    /// First-line indent of indented paragraphs, in characters.
+    indent: usize,
+    /// Baselines of the running header and footer, from the bottom edge.
+    header_y: f32,
+    footer_y: f32,
+    /// Standard manuscript format rules (see [`PageStyle::manuscript`]).
+    manuscript: bool,
+}
+
+impl PageStyle {
+    /// The default layout: 11pt single-spaced Courier with ~20 mm margins and a
+    /// centered page number.
+    fn standard(paper: Paper) -> Self {
+        let (w, h) = paper_size(paper);
+        Self {
+            w,
+            h,
+            margin_x: 56.7,
+            margin_top: 56.7,
+            bottom_limit: 56.7 + 30.0,
+            body: 11.0,
+            double_spaced: false,
+            block_gap: 0.5,
+            indent: 4,
+            header_y: h - 30.0,
+            footer_y: 30.0,
+            manuscript: false,
+        }
+    }
+
+    /// Standard manuscript format, as fiction editors expect submissions: 12pt
+    /// Courier, double-spaced, 1" margins, 0.5" paragraph indents with no gaps,
+    /// a contact block and word count on page one, and a `Surname / TITLE / n`
+    /// header on the pages after it.
+    fn manuscript(paper: Paper) -> Self {
+        let (w, h) = paper_size(paper);
+        Self {
+            w,
+            h,
+            margin_x: 72.0,
+            margin_top: 72.0,
+            bottom_limit: 72.0,
+            body: 12.0,
+            double_spaced: true,
+            block_gap: 0.0,
+            indent: 5, // 5 × 7.2pt = 0.5"
+            header_y: h - 36.0,
+            footer_y: 36.0,
+            manuscript: true,
+        }
+    }
+
+    fn max_chars(&self, size: f32) -> usize {
+        ((self.w - 2.0 * self.margin_x) / char_w(size)).floor() as usize
+    }
+
+    fn line_height(&self, size: f32) -> f32 {
+        if self.double_spaced {
+            size * 2.0
+        } else {
+            size + LINE_GAP
+        }
+    }
+
+    fn heading_size(&self, level: u8) -> f32 {
+        if self.manuscript {
+            return self.body;
+        }
+        match level {
+            1 => 20.0,
+            2 => 16.0,
+            3 => 14.0,
+            4 => 12.0,
+            _ => self.body,
+        }
     }
 }
 
@@ -73,7 +164,12 @@ impl Seg {
 /// A laid-out-able block of content. Shared with the graphical preview.
 pub(crate) enum Block {
     Heading(u8, Vec<Seg>),
-    Para(Vec<Seg>),
+    /// A paragraph; `indent` asks for a first-line indent instead of a gap
+    /// before it (prose paragraphs after the first, with `paragraphs: lines`).
+    Para {
+        segs: Vec<Seg>,
+        indent: bool,
+    },
     Item {
         depth: usize,
         marker: String,
@@ -86,43 +182,48 @@ pub(crate) enum Block {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+    /// A `.pa` page break.
+    PageBreak,
 }
 
-/// Render `markdown` to PDF bytes. `title` is used as the document title.
+/// Render `markdown` to PDF bytes. `title` is used as the document title
+/// (unless the frontmatter names one).
 pub fn export(markdown: &str, title: &str) -> Vec<u8> {
-    let blocks = parse(strip_frontmatter(markdown));
-    let mut doc = PdfDocument::new(title);
-    let pages = Layout::new().run(&blocks);
+    let opts = crate::attributes::render_options(markdown);
+    let setup = crate::attributes::page_setup(markdown);
+    let blocks = parse(strip_frontmatter(markdown), &opts);
+    let lines: Vec<String> = markdown.lines().map(str::to_owned).collect();
+    let words = crate::attributes::count_words(&lines).words;
+    let doc_title = opts
+        .manuscript
+        .as_ref()
+        .map(|m| m.title.clone())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| title.to_string());
+    let mut doc = PdfDocument::new(&doc_title);
+    let pages = Layout::new(&opts, setup, words).run(&blocks);
     doc.with_pages(pages)
         .save(&PdfSaveOptions::default(), &mut Vec::new())
-}
-
-/// Drop a leading YAML frontmatter block (`--- … ---`) so it is not printed.
-pub(crate) fn strip_frontmatter(src: &str) -> &str {
-    let mut lines = src.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        return src;
-    }
-    let mut offset = 4; // past "---\n"
-    for line in lines {
-        offset += line.len() + 1;
-        if line.trim() == "---" {
-            return src.get(offset..).unwrap_or("");
-        }
-    }
-    src
 }
 
 // ---------------------------------------------------------------------------
 // Markdown -> blocks
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse(src: &str) -> Vec<Block> {
-    // Drop dot commands and rewrite pandoc attribute spans (underline → sentinels).
-    let src = crate::attributes::prepare_render_source(src);
-    let opts = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
-    let mut b = Builder::default();
-    for event in Parser::new_ext(&src, opts) {
+/// Parse Markdown (frontmatter already stripped) into blocks.
+pub(crate) fn parse(src: &str, opts: &RenderOptions) -> Vec<Block> {
+    // Handle dot commands and the paragraph mode, and rewrite pandoc attribute
+    // spans (underline → sentinels).
+    let src = crate::attributes::prepare_render_source(src, opts);
+    let mut md = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    if opts.smart {
+        md |= Options::ENABLE_SMART_PUNCTUATION;
+    }
+    let mut b = Builder {
+        prose: opts.prose_paragraphs,
+        ..Builder::default()
+    };
+    for event in Parser::new_ext(&src, md) {
         b.handle(event);
     }
     b.blocks
@@ -131,6 +232,8 @@ pub(crate) fn parse(src: &str) -> Vec<Block> {
 #[derive(Default)]
 struct Builder {
     blocks: Vec<Block>,
+    /// `paragraphs: lines`: indent paragraphs that follow a paragraph.
+    prose: bool,
     inline: Vec<Seg>,
     bold: u32,
     italic: u32,
@@ -172,7 +275,9 @@ impl Builder {
                 }
             }
             Event::Code(t) => self.push_seg(&t),
-            Event::SoftBreak | Event::HardBreak => self.push_seg(" "),
+            Event::SoftBreak => self.push_seg(" "),
+            // A hard line break (verse, letters) is kept; layout breaks there.
+            Event::HardBreak => self.push_seg("\n"),
             Event::Rule => self.blocks.push(Block::Rule),
             Event::TaskListMarker(checked) => {
                 self.cur_marker = if checked {
@@ -236,8 +341,13 @@ impl Builder {
                     }
                 } else if !self.in_item {
                     let segs = std::mem::take(&mut self.inline);
-                    if !segs.is_empty() {
-                        self.blocks.push(Block::Para(segs));
+                    let text: String = segs.iter().map(|s| s.text.as_str()).collect();
+                    if text.trim() == PAGE_BREAK.to_string() {
+                        self.blocks.push(Block::PageBreak);
+                    } else if !segs.is_empty() {
+                        let indent =
+                            self.prose && matches!(self.blocks.last(), Some(Block::Para { .. }));
+                        self.blocks.push(Block::Para { segs, indent });
                     }
                 }
                 // Inside a list item the text is flushed at Item end.
@@ -360,10 +470,23 @@ impl Builder {
 // ---------------------------------------------------------------------------
 
 struct Layout {
+    style: PageStyle,
+    setup: PageSetup,
+    /// Author details for standard manuscript format.
+    manuscript: Option<Manuscript>,
+    /// Approximate word count for the manuscript title page.
+    words: usize,
+    /// `paragraphs: lines` — scene breaks become centered asterisks.
+    prose: bool,
     pages: Vec<PdfPage>,
     ops: Vec<Op>,
     y: f32,
     page_no: usize,
+    /// Nothing has been placed on the current page yet.
+    at_top: bool,
+    /// Some body block has been laid out (the first chapter heading of a
+    /// manuscript goes under the byline, not on a new page).
+    body_started: bool,
     /// Underline / strikethrough rules to stroke on the current page, as
     /// `(x0, x1, y)` in PDF points. Drawn after the text section (graphics
     /// operators are not allowed inside a text object).
@@ -371,12 +494,24 @@ struct Layout {
 }
 
 impl Layout {
-    fn new() -> Self {
+    fn new(opts: &RenderOptions, setup: PageSetup, words: usize) -> Self {
+        let manuscript = opts.manuscript.clone();
+        let style = match &manuscript {
+            Some(_) => PageStyle::manuscript(opts.paper.unwrap_or(Paper::Letter)),
+            None => PageStyle::standard(opts.paper.unwrap_or(Paper::A4)),
+        };
         let mut l = Layout {
+            style,
+            setup,
+            manuscript,
+            words,
+            prose: opts.prose_paragraphs,
             pages: Vec::new(),
             ops: Vec::new(),
             y: 0.0,
             page_no: 0,
+            at_top: true,
+            body_started: false,
             decorations: Vec::new(),
         };
         l.start_page();
@@ -384,34 +519,62 @@ impl Layout {
     }
 
     fn run(mut self, blocks: &[Block]) -> Vec<PdfPage> {
-        for block in blocks {
+        if let Some(m) = self.manuscript.clone() {
+            self.title_page(&m);
+        }
+        for (i, block) in blocks.iter().enumerate() {
             self.block(block);
-            self.blank(0.5);
+            self.body_started = true;
+            // Consecutive indented paragraphs follow each other without a gap.
+            let next_indented = matches!(blocks.get(i + 1), Some(Block::Para { indent: true, .. }));
+            if !next_indented && !matches!(block, Block::PageBreak) {
+                self.blank(self.style.block_gap);
+            }
+        }
+        if self.manuscript.is_some() {
+            self.centered(&[Seg::plain("END")], self.style.body);
         }
         self.finish_page();
         self.pages
     }
 
+    /// The printed page number of the current page.
+    fn page_number(&self) -> usize {
+        self.setup.first_page + self.page_no - 1
+    }
+
     fn start_page(&mut self) {
         self.page_no += 1;
         self.ops = vec![Op::StartTextSection];
-        self.y = PAGE_H - MARGIN - BODY;
+        self.y = self.style.h - self.style.margin_top - self.style.body;
+        self.at_top = true;
     }
 
     fn finish_page(&mut self) {
-        // Centered page number footer.
-        let label = format!("- {} -", self.page_no);
-        let x = (PAGE_W - label.chars().count() as f32 * char_w(9.0)) / 2.0;
-        self.ops.push(Op::SetTextMatrix {
-            matrix: TextMatrix::Translate(Pt(x), Pt(FOOTER_Y)),
-        });
-        self.ops.push(Op::SetFont {
-            font: PdfFontHandle::Builtin(BuiltinFont::Courier),
-            size: Pt(9.0),
-        });
-        self.ops.push(Op::ShowText {
-            items: vec![TextItem::Text(label)],
-        });
+        let number = self.page_number();
+        let st = self.style.clone();
+
+        // Running header: a `.he` line, or the manuscript's "Surname / TITLE / n"
+        // from page two on.
+        if let Some(text) = self.setup.header(number) {
+            let size = if st.manuscript { st.body } else { MARGINALIA };
+            self.text_at(st.margin_x, st.header_y, &text, size);
+        } else if let Some(m) = self.manuscript.as_ref().filter(|_| self.page_no > 1) {
+            let text = format!("{} / {} / {number}", m.surname, m.title.to_uppercase());
+            let x = st.w - st.margin_x - text.chars().count() as f32 * char_w(st.body);
+            self.text_at(x, st.header_y, &text, st.body);
+        }
+
+        // Footer: a `.fo` line, else a centered page number (not in manuscript
+        // format, whose header carries it, nor after `.op`).
+        if let Some(text) = self.setup.footer(number) {
+            let size = if st.manuscript { st.body } else { MARGINALIA };
+            self.text_at(st.margin_x, st.footer_y, &text, size);
+        } else if !st.manuscript && !self.setup.omit_page_numbers {
+            let label = format!("- {number} -");
+            let x = (st.w - label.chars().count() as f32 * char_w(MARGINALIA)) / 2.0;
+            self.text_at(x, st.footer_y, &label, MARGINALIA);
+        }
         self.ops.push(Op::EndTextSection);
 
         // Stroke underline / strikethrough rules (outside the text section).
@@ -452,7 +615,8 @@ impl Layout {
         }
 
         let ops = std::mem::take(&mut self.ops);
-        self.pages.push(PdfPage::new(Mm(210.0), Mm(297.0), ops));
+        let mm = |pt: f32| Mm(pt * 25.4 / 72.0);
+        self.pages.push(PdfPage::new(mm(st.w), mm(st.h), ops));
     }
 
     fn newpage(&mut self) {
@@ -461,21 +625,44 @@ impl Layout {
     }
 
     fn blank(&mut self, fraction: f32) {
-        self.y -= (BODY + LINE_GAP) * fraction;
+        self.y -= self.style.line_height(self.style.body) * fraction;
+    }
+
+    /// Plain Courier text at an absolute position (headers, footers, the
+    /// manuscript title page), outside the flowing body text.
+    fn text_at(&mut self, x: f32, y: f32, text: &str, size: f32) {
+        self.ops.push(Op::SetTextMatrix {
+            matrix: TextMatrix::Translate(Pt(x), Pt(y)),
+        });
+        self.ops.push(Op::SetFont {
+            font: PdfFontHandle::Builtin(BuiltinFont::Courier),
+            size: Pt(size),
+        });
+        self.ops.push(Op::ShowText {
+            items: vec![TextItem::Text(sanitize(text))],
+        });
     }
 
     /// Emit one visual line of styled segments at `x`, in font `size`.
     fn line(&mut self, x: f32, segs: &[Seg], size: f32) {
-        let lh = size + LINE_GAP;
-        if self.y < MARGIN + FOOTER_Y {
+        let lh = self.style.line_height(size);
+        if self.y < self.style.bottom_limit {
             self.newpage();
         }
+        self.at_top = false;
         self.ops.push(Op::SetTextMatrix {
             matrix: TextMatrix::Translate(Pt(x), Pt(self.y)),
         });
+        let underline_italics = self.manuscript.as_ref().is_some_and(|m| m.underline_italics);
         let mut sx = x;
         for s in segs {
-            let font = courier(s.bold, s.italic);
+            // Classic manuscripts underline what will be set in italics.
+            let (italic, underline) = if underline_italics {
+                (false, s.underline || s.italic)
+            } else {
+                (s.italic, s.underline)
+            };
+            let font = courier(s.bold, italic);
             self.ops.push(Op::SetFont {
                 font: PdfFontHandle::Builtin(font),
                 size: Pt(size),
@@ -484,7 +671,7 @@ impl Layout {
                 items: vec![TextItem::Text(sanitize(&s.text))],
             });
             let w = s.text.chars().count() as f32 * char_w(size);
-            if s.underline {
+            if underline {
                 self.decorations.push((sx, sx + w, self.y - size * 0.12));
             }
             if s.strike {
@@ -495,10 +682,57 @@ impl Layout {
         self.y -= lh;
     }
 
+    /// One line centered between the margins.
+    fn centered(&mut self, segs: &[Seg], size: f32) {
+        let len: usize = segs.iter().map(|s| s.text.chars().count()).sum();
+        let x = ((self.style.w - len as f32 * char_w(size)) / 2.0).max(self.style.margin_x);
+        self.line(x, segs, size);
+    }
+
+    /// Page one of a standard manuscript: the author's name and contact details
+    /// top left, the approximate word count top right, and the title and byline
+    /// centered halfway down, where the story then begins.
+    fn title_page(&mut self, m: &Manuscript) {
+        let st = self.style.clone();
+        let top = st.h - st.margin_top - st.body;
+        let single = st.body + LINE_GAP;
+        let contact = std::iter::once(&m.author).chain(&m.contact);
+        for (i, line) in contact.filter(|l| !l.is_empty()).enumerate() {
+            self.text_at(st.margin_x, top - i as f32 * single, line, st.body);
+        }
+        let count = format!("about {} words", approximate_words(self.words));
+        let x = st.w - st.margin_x - count.chars().count() as f32 * char_w(st.body);
+        self.text_at(x, top, &count, st.body);
+
+        self.y = st.h / 2.0;
+        if !m.title.is_empty() {
+            self.centered(&[Seg::plain(m.title.clone())], st.body);
+        }
+        if !m.byline.is_empty() {
+            self.centered(&[Seg::plain(format!("by {}", m.byline))], st.body);
+        }
+        self.blank(1.0);
+    }
+
     fn block(&mut self, block: &Block) {
+        let st = self.style.clone();
         match block {
+            Block::Heading(level, segs) if st.manuscript => {
+                // Chapters start on a new page, a third of the way down — except
+                // the first, which follows the title and byline on page one.
+                if *level == 1 && self.body_started && !self.at_top {
+                    self.newpage();
+                }
+                if *level == 1 && self.at_top {
+                    self.y = self.y.min(st.h * 2.0 / 3.0);
+                }
+                for line in wrap(segs, st.max_chars(st.body), 0) {
+                    self.centered(&line, st.body);
+                }
+                self.blank(1.0);
+            }
             Block::Heading(level, segs) => {
-                let size = heading_size(*level);
+                let size = st.heading_size(*level);
                 let bolded: Vec<Seg> = segs
                     .iter()
                     .map(|s| Seg {
@@ -506,13 +740,16 @@ impl Layout {
                         ..s.clone()
                     })
                     .collect();
-                for line in wrap(&bolded, max_chars(size)) {
-                    self.line(MARGIN, &line, size);
+                for line in wrap(&bolded, st.max_chars(size), 0) {
+                    self.line(st.margin_x, &line, size);
                 }
             }
-            Block::Para(segs) => {
-                for line in wrap(segs, max_chars(BODY)) {
-                    self.line(MARGIN, &line, BODY);
+            Block::Para { segs, indent } => {
+                // Manuscripts indent every paragraph; otherwise only prose
+                // paragraphs that follow another paragraph.
+                let indent = if st.manuscript || *indent { st.indent } else { 0 };
+                for line in wrap(segs, st.max_chars(st.body), indent) {
+                    self.line(st.margin_x, &line, st.body);
                 }
             }
             Block::Item {
@@ -520,49 +757,59 @@ impl Layout {
                 marker,
                 segs,
             } => {
-                let indent = MARGIN + (*depth as f32) * 2.0 * char_w(BODY);
+                let indent = st.margin_x + (*depth as f32) * 2.0 * char_w(st.body);
                 let marker_w = marker.chars().count();
-                let avail = max_chars(BODY).saturating_sub(depth * 2 + marker_w).max(8);
-                let lines = wrap(segs, avail);
-                let cont_x = indent + marker_w as f32 * char_w(BODY);
+                let avail = st.max_chars(st.body).saturating_sub(depth * 2 + marker_w).max(8);
+                let lines = wrap(segs, avail, 0);
+                let cont_x = indent + marker_w as f32 * char_w(st.body);
                 for (i, line) in lines.iter().enumerate() {
                     if i == 0 {
                         let mut first = vec![Seg::plain(marker.clone())];
                         first.extend(line.iter().cloned());
-                        self.line(indent, &first, BODY);
+                        self.line(indent, &first, st.body);
                     } else {
-                        self.line(cont_x, line, BODY);
+                        self.line(cont_x, line, st.body);
                     }
                 }
                 if lines.is_empty() {
-                    self.line(indent, &[Seg::plain(marker.clone())], BODY);
+                    self.line(indent, &[Seg::plain(marker.clone())], st.body);
                 }
             }
             Block::Code(lines) => {
                 for raw in lines {
-                    for chunk in hard_wrap(raw, max_chars(BODY)) {
-                        self.line(MARGIN, &[Seg::plain(chunk)], BODY);
+                    for chunk in hard_wrap(raw, st.max_chars(st.body)) {
+                        self.line(st.margin_x, &[Seg::plain(chunk)], st.body);
                     }
                 }
             }
             Block::Quote(segs) => {
-                let avail = max_chars(BODY).saturating_sub(2).max(8);
-                for line in wrap(segs, avail) {
+                let avail = st.max_chars(st.body).saturating_sub(2).max(8);
+                for line in wrap(segs, avail, 0) {
                     let mut row = vec![Seg::plain("> ")];
                     for s in line {
                         row.push(Seg { italic: true, ..s });
                     }
-                    self.line(MARGIN, &row, BODY);
+                    self.line(st.margin_x, &row, st.body);
                 }
             }
+            // A scene break: the manuscript convention is a centered "#".
+            Block::Rule if st.manuscript => self.centered(&[Seg::plain("#")], st.body),
+            Block::Rule if self.prose => self.centered(&[Seg::plain("*   *   *")], st.body),
             Block::Rule => {
-                self.line(MARGIN, &[Seg::plain("-".repeat(max_chars(BODY)))], BODY);
+                self.line(st.margin_x, &[Seg::plain("-".repeat(st.max_chars(st.body)))], st.body);
             }
             Block::Table { header, rows } => self.table(header, rows),
+            Block::PageBreak => {
+                if !self.at_top {
+                    self.newpage();
+                }
+            }
         }
     }
 
     fn table(&mut self, header: &[String], rows: &[Vec<String>]) {
+        let body = self.style.body;
+        let margin = self.style.margin_x;
         let ncols = header
             .len()
             .max(rows.iter().map(Vec::len).max().unwrap_or(0));
@@ -583,7 +830,7 @@ impl Layout {
         }
         // Keep the table within the printable width by shrinking the widest
         // columns (each column has 3 chars of "| " padding plus a final "|").
-        let budget = max_chars(BODY);
+        let budget = self.style.max_chars(body);
         let frame = |w: &[usize]| -> usize { w.iter().sum::<usize>() + 3 * ncols + 1 };
         while frame(&widths) > budget {
             let Some((i, _)) = widths.iter().enumerate().max_by_key(|(_, w)| **w) else {
@@ -620,14 +867,33 @@ impl Layout {
             ..Seg::default()
         };
 
-        self.line(MARGIN, &[mono(border.clone(), false)], BODY);
-        self.line(MARGIN, &[mono(row_text(header), true)], BODY);
-        self.line(MARGIN, &[mono(border.clone(), false)], BODY);
+        self.line(margin, &[mono(border.clone(), false)], body);
+        self.line(margin, &[mono(row_text(header), true)], body);
+        self.line(margin, &[mono(border.clone(), false)], body);
         for r in rows {
-            self.line(MARGIN, &[mono(row_text(r), false)], BODY);
+            self.line(margin, &[mono(row_text(r), false)], body);
         }
-        self.line(MARGIN, &[mono(border, false)], BODY);
+        self.line(margin, &[mono(border, false)], body);
     }
+}
+
+/// A manuscript's "about N words": rounded to the nearest hundred (exact below
+/// a hundred), with thousands separators.
+fn approximate_words(words: usize) -> String {
+    let n = if words < 100 {
+        words
+    } else {
+        (words + 50) / 100 * 100
+    };
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Pad or truncate `s` to exactly `w` characters (left-aligned).
@@ -641,24 +907,41 @@ fn pad(s: &str, w: usize) -> String {
 }
 
 /// Greedily wrap styled segments into visual lines of at most `max` characters.
-fn wrap(segs: &[Seg], max: usize) -> Vec<Vec<Seg>> {
+/// The first line starts with `indent` spaces (a paragraph indent), and a `\n`
+/// in the text — a hard line break — always starts a new line.
+fn wrap(segs: &[Seg], max: usize, indent: usize) -> Vec<Vec<Seg>> {
     let max = max.max(1);
+    let indent = indent.min(max / 2);
     let mut lines: Vec<Vec<Seg>> = Vec::new();
     let mut line: Vec<Seg> = Vec::new();
     let mut col = 0usize;
+    // No word on the current line yet (so the next one needs no leading space).
+    let mut fresh = true;
+    if indent > 0 {
+        line.push(Seg::plain(" ".repeat(indent)));
+        col = indent;
+    }
 
     for seg in segs {
-        for word in seg.text.split_whitespace() {
-            for piece in hard_wrap(word, max) {
-                let plen = piece.chars().count();
-                let need = if col == 0 { plen } else { plen + 1 };
-                if col > 0 && col + need > max {
-                    lines.push(std::mem::take(&mut line));
-                    col = 0;
+        for (i, part) in seg.text.split('\n').enumerate() {
+            if i > 0 {
+                lines.push(std::mem::take(&mut line));
+                col = 0;
+                fresh = true;
+            }
+            for word in part.split_whitespace() {
+                for piece in hard_wrap(word, max) {
+                    let plen = piece.chars().count();
+                    if !fresh && col + plen + 1 > max {
+                        lines.push(std::mem::take(&mut line));
+                        col = 0;
+                        fresh = true;
+                    }
+                    let add_space = !fresh;
+                    push_word(&mut line, &piece, seg, add_space);
+                    col += if add_space { plen + 1 } else { plen };
+                    fresh = false;
                 }
-                let add_space = col > 0;
-                push_word(&mut line, &piece, seg, add_space);
-                col += if add_space { plen + 1 } else { plen };
             }
         }
     }
@@ -737,9 +1020,12 @@ mod tests {
 
     #[test]
     fn parse_flags_underline_and_strikethrough() {
-        let blocks = parse("plain [under]{.underline} and ~~struck~~ text");
+        let blocks = parse(
+            "plain [under]{.underline} and ~~struck~~ text",
+            &RenderOptions::default(),
+        );
         let segs = match &blocks[0] {
-            Block::Para(s) => s,
+            Block::Para { segs, .. } => segs,
             other => panic!(
                 "expected paragraph, got {:?}",
                 std::mem::discriminant(other)
@@ -775,12 +1061,132 @@ mod tests {
     #[test]
     fn wrap_breaks_long_paragraph() {
         let seg = Seg::plain("word ".repeat(40).trim().to_string());
-        let lines = wrap(&[seg], 20);
+        let lines = wrap(&[seg], 20, 0);
         assert!(lines.len() > 1, "expected multiple wrapped lines");
         for l in &lines {
             let len: usize = l.iter().map(|s| s.text.chars().count()).sum();
             assert!(len <= 20, "line exceeds width: {len}");
         }
+    }
+
+    fn layout(md: &str) -> Vec<PdfPage> {
+        let opts = crate::attributes::render_options(md);
+        let setup = crate::attributes::page_setup(md);
+        let lines: Vec<String> = md.lines().map(str::to_owned).collect();
+        let words = crate::attributes::count_words(&lines).words;
+        Layout::new(&opts, setup, words).run(&parse(strip_frontmatter(md), &opts))
+    }
+
+    /// All text drawn on a page, pieces joined with `|`.
+    fn page_text(page: &PdfPage) -> String {
+        page.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::ShowText { items } => Some(
+                    items
+                        .iter()
+                        .filter_map(|i| match i {
+                            TextItem::Text(t) => Some(t.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn page_break_dot_command_starts_a_new_page() {
+        let pages = layout("Chapter one.\n.pa\nChapter two.");
+        assert_eq!(pages.len(), 2);
+        assert!(page_text(&pages[0]).contains("Chapter one."));
+        assert!(page_text(&pages[1]).contains("Chapter two."));
+        // A break at the top of a page doesn't leave a blank page.
+        assert_eq!(layout(".pa\nText").len(), 1);
+    }
+
+    #[test]
+    fn headers_and_footers_print_with_page_numbers() {
+        let pages = layout(".oh My Novel - page #\n.fo Draft\n.pn 3\nOne\n.pa\nTwo");
+        assert!(page_text(&pages[0]).contains("My Novel - page 3"), "odd page 3");
+        assert!(!page_text(&pages[1]).contains("My Novel"), "no header on even pages");
+        assert!(page_text(&pages[1]).contains("Draft"));
+        assert!(!page_text(&pages[1]).contains("- 4 -"), "footer replaces the number");
+        // Without a footer the page number is printed, unless `.op`.
+        assert!(page_text(&layout("Body")[0]).contains("- 1 -"));
+        assert!(!page_text(&layout(".op\nBody")[0]).contains("- 1 -"));
+    }
+
+    #[test]
+    fn smart_punctuation_curls_quotes_and_dashes() {
+        let blocks = parse("\"Hello\" -- it's... fine --- ok", &RenderOptions::default());
+        let Block::Para { segs, .. } = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        let text: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "\u{201C}Hello\u{201D} \u{2013} it\u{2019}s\u{2026} fine \u{2014} ok");
+        // All of these print in the PDF's WinAnsi encoding.
+        assert_eq!(sanitize(&text), text);
+    }
+
+    #[test]
+    fn hard_line_breaks_are_kept() {
+        let blocks = parse("Roses are red,\\\nviolets are blue", &RenderOptions::default());
+        let Block::Para { segs, .. } = &blocks[0] else {
+            panic!("expected a paragraph");
+        };
+        let lines = wrap(segs, 60, 0);
+        assert_eq!(lines.len(), 2, "one line per verse line");
+    }
+
+    #[test]
+    fn prose_paragraphs_indent_instead_of_code_blocks() {
+        let md = "---\nparagraphs: lines\n---\nFirst paragraph.\n\tSecond paragraph.\nThird.";
+        let opts = crate::attributes::render_options(md);
+        let blocks = parse(strip_frontmatter(md), &opts);
+        let indents: Vec<bool> = blocks
+            .iter()
+            .map(|b| match b {
+                Block::Para { indent, .. } => *indent,
+                _ => panic!("only paragraphs expected, no code block"),
+            })
+            .collect();
+        assert_eq!(indents, [false, true, true]);
+        let text = page_text(&layout(md)[0]);
+        assert!(text.contains("    Second paragraph."), "indented: {text}");
+    }
+
+    #[test]
+    fn manuscript_format_has_title_page_header_and_end() {
+        let body = "word ".repeat(1234);
+        let md = format!(
+            "---\nformat: manuscript\ntitle: The Red House\nauthor: Jane Q. Writer\nbyline: J. Q. Writer\ncontact:\n  - 1 Elm St\n  - jane@example.com\n---\n# One\n\n{body}\n\n***\n\nThe end."
+        );
+        let pages = layout(&md);
+        assert!(pages.len() >= 3);
+        assert!(page_text(&pages[0]).contains("|One|"), "chapter one starts on page one");
+        // US Letter by default, in points.
+        assert!((pages[0].media_box.width.0 - 612.0).abs() < 0.5);
+        assert!((pages[0].media_box.height.0 - 792.0).abs() < 0.5);
+        let first = page_text(&pages[0]);
+        for want in ["Jane Q. Writer", "1 Elm St", "jane@example.com", "about 1,200 words", "The Red House", "by J. Q. Writer"] {
+            assert!(first.contains(want), "{want:?} missing from page 1: {first}");
+        }
+        assert!(!first.contains("- 1 -"), "no footer page number");
+        let second = page_text(&pages[1]);
+        assert!(second.contains("Writer / THE RED HOUSE / 2"), "header: {second}");
+        let all: String = pages.iter().map(page_text).collect();
+        assert!(all.contains("|#|"), "scene break as a centered #");
+        assert!(all.contains("The end.|END|"), "END after the last line");
+    }
+
+    #[test]
+    fn approximate_word_counts_round_to_hundreds() {
+        assert_eq!(approximate_words(87), "87");
+        assert_eq!(approximate_words(1234), "1,200");
+        assert_eq!(approximate_words(123_456), "123,500");
     }
 
     #[test]

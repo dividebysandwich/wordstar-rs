@@ -129,6 +129,8 @@ pub enum Command {
     GoToPage,
     /// Set the right margin, the column text wraps at (^OR).
     RightMargin,
+    /// Add the frontmatter for standard manuscript format.
+    ManuscriptTemplate,
     /// Jump to the beginning / end of the marked block (^QB / ^QK).
     GotoBlockBegin,
     GotoBlockEnd,
@@ -176,8 +178,16 @@ pub fn execute(app: &mut App, cmd: Command) {
             app.textarea.scroll(Scrolling::PageDown);
             app.scroll_viewport(h as isize);
         }
-        DocStart => app.textarea.move_cursor(CursorMove::Top),
-        DocEnd => app.textarea.move_cursor(CursorMove::Bottom),
+        // The very start / end of the text (the widget's Top / Bottom keep the
+        // column).
+        DocStart => {
+            app.textarea.move_cursor(CursorMove::Top);
+            app.textarea.move_cursor(CursorMove::Head);
+        }
+        DocEnd => {
+            app.textarea.move_cursor(CursorMove::Bottom);
+            app.textarea.move_cursor(CursorMove::End);
+        }
         ScrollUpLine => {
             app.textarea.scroll((-1, 0));
             app.scroll_viewport(-1);
@@ -233,6 +243,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         Calculator => app.start_calculator(),
         GoToPage => app.start_goto_page(),
         RightMargin => app.start_right_margin(),
+        ManuscriptTemplate => app.insert_manuscript_template(),
         GotoBlockBegin => app.goto_block(false),
         GotoBlockEnd => app.goto_block(true),
 

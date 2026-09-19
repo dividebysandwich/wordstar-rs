@@ -9,6 +9,8 @@
 //! - Inline print effects are single control bytes (bold `0x02`, italic `0x19`,
 //!   underline `0x13`, strikeout `0x18`, …).
 //! - Lines beginning with `.` in column 1 are dot commands (layout directives).
+//!   The ones this editor understands (page breaks, headers/footers, page
+//!   numbering, right margin) are kept; the rest are dropped.
 //! - `0x1A` marks end of text; the file is padded with `0x1A` to a block size.
 //!
 //! The result is Markdown so it slots straight into the editor.
@@ -77,6 +79,10 @@ fn body_start(bytes: &[u8]) -> usize {
     }
 }
 
+/// Dot commands that survive an import: page break, headers/footers, page
+/// numbering and the right margin.
+const KEPT_DOT_COMMANDS: &[&str] = &["pa", "he", "fo", "oh", "eh", "of", "ef", "op", "pn", "rm"];
+
 /// Decode WordStar bytes into Markdown text.
 pub fn decode(bytes: &[u8]) -> String {
     let body = &bytes[body_start(bytes)..];
@@ -88,10 +94,26 @@ pub fn decode(bytes: &[u8]) -> String {
     while i < body.len() {
         let b = body[i];
 
-        // Dot command lines (e.g. `.PA`, `.LM 8`) are layout directives — drop them.
+        // Dot command lines (e.g. `.PA`, `.LM 8`) are layout directives. Keep the
+        // ones the editor supports (lowercased, as it writes them); drop the rest.
         if at_line_start && b == b'.' && body.get(i + 1).is_some_and(u8::is_ascii_alphabetic) {
+            let start = i;
             while i < body.len() && !matches!(body[i], 0x0D | 0x8D | 0x1A) {
                 i += 1;
+            }
+            let line: String = body[start..i]
+                .iter()
+                .map(|&c| (c & 0x7F) as char)
+                .filter(|c| !c.is_control())
+                .collect();
+            let name = line.get(1..3).unwrap_or("").to_ascii_lowercase();
+            if KEPT_DOT_COMMANDS.contains(&name.as_str())
+                && !line[3..].starts_with(|c: char| c.is_ascii_alphabetic())
+            {
+                out.push('.');
+                out.push_str(&name);
+                out.push_str(&line[3..]);
+                out.push('\n');
             }
             if i < body.len() && matches!(body[i], 0x0D | 0x8D) {
                 i += 1;
@@ -231,10 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn dot_commands_are_dropped() {
-        let body = b".PA\x0d\x0a.LM 8\x0d\x0aBody text";
+    fn unsupported_dot_commands_are_dropped_supported_ones_kept() {
+        let body = b".PA\x0d\x0a.LM 8\x0d\x0a.HE My Novel\x0d\x0aBody text";
         let data = with_header(body);
-        assert_eq!(decode(&data), "Body text");
+        assert_eq!(decode(&data), ".pa\n.he My Novel\nBody text");
     }
 
     #[test]

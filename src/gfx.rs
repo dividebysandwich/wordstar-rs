@@ -3,8 +3,9 @@
 //! Reuses the Markdown→blocks parser from [`crate::pdf`] and lays each block out
 //! with `cosmic-text` using the system fonts, so the preview shows real
 //! proportional type with actual bold/italic and scaled headings. Content is
-//! paginated into A4-proportioned pages (breaking between blocks, slicing only
-//! blocks taller than a page), which the app shows one at a time, zoomable and
+//! paginated into A4-proportioned pages (breaking between blocks and at `.pa`,
+//! slicing only blocks taller than a page), with the document's running header,
+//! footer and page numbers, which the app shows one at a time, zoomable and
 //! scrollable. If no system fonts are available the list is empty and the caller
 //! falls back to the text preview.
 
@@ -15,6 +16,7 @@ use cosmic_text::{
 };
 use image::{Rgba, RgbaImage, imageops};
 
+use crate::attributes::{Manuscript, PageSetup};
 use crate::pdf::{Block, Seg, parse, strip_frontmatter};
 
 // Layout constants, in image pixels.
@@ -144,18 +146,33 @@ fn prepare_text(s: &str) -> String {
     })
 }
 
+/// One rendered block, ready to be stacked onto pages.
+enum Strip {
+    Image {
+        img: RgbaImage,
+        /// Leave paragraph spacing after it (not before an indented paragraph).
+        gap_after: bool,
+    },
+    /// A `.pa` page break.
+    PageBreak,
+}
+
 /// An incremental rasterization job: renders one block per `step` call (within a
 /// time budget) so the UI can show a progress modal for long documents.
 pub struct Job {
     blocks: Vec<Block>,
     next: usize,
-    strips: Vec<RgbaImage>,
+    strips: Vec<Strip>,
+    setup: PageSetup,
+    manuscript: Option<Manuscript>,
 }
 
 impl Job {
     /// Start a job, or `None` if no system fonts are available (→ text preview).
     pub fn new(markdown: &str) -> Option<Job> {
-        let blocks = parse(strip_frontmatter(markdown));
+        let opts = crate::attributes::render_options(markdown);
+        let setup = crate::attributes::page_setup(markdown);
+        let blocks = parse(strip_frontmatter(markdown), &opts);
         let have_fonts = FONTS.with(|fonts| {
             let mut fonts = fonts.borrow_mut();
             if fonts.is_none() {
@@ -171,6 +188,8 @@ impl Job {
             blocks,
             next: 0,
             strips: Vec::with_capacity(cap),
+            setup,
+            manuscript: opts.manuscript,
         })
     }
 
@@ -196,7 +215,16 @@ impl Job {
             CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 while self.next < self.blocks.len() {
-                    let strip = build_strip(fs, &mut cache, &self.blocks[self.next]);
+                    let strip = match &self.blocks[self.next] {
+                        Block::PageBreak => Strip::PageBreak,
+                        block => Strip::Image {
+                            img: build_strip(fs, &mut cache, block),
+                            gap_after: !matches!(
+                                self.blocks.get(self.next + 1),
+                                Some(Block::Para { indent: true, .. })
+                            ),
+                        },
+                    };
                     self.strips.push(strip);
                     self.next += 1;
                     if crate::platform::now_ms() - start >= budget_ms {
@@ -207,10 +235,82 @@ impl Job {
         });
     }
 
-    /// Consume the finished job and paginate the strips into pages.
+    /// Consume the finished job: paginate the strips into pages and add the
+    /// running header, footer and page number to each.
     pub fn finish(self) -> Vec<RgbaImage> {
-        paginate(&self.strips)
+        let mut pages = paginate(&self.strips);
+        FONTS.with(|fonts| {
+            let mut fonts = fonts.borrow_mut();
+            let Some(fs) = fonts.as_mut() else {
+                return;
+            };
+            CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                for (i, page) in pages.iter_mut().enumerate() {
+                    self.stamp_marginalia(fs, &mut cache, page, i);
+                }
+            });
+        });
+        pages
     }
+
+    /// Draw page `index`'s header and footer in its top and bottom margins, the
+    /// way the PDF prints them: `.he`/`.fo` lines, a manuscript's running header,
+    /// or a centered page number.
+    fn stamp_marginalia(
+        &self,
+        fs: &mut FontSystem,
+        cache: &mut SwashCache,
+        page: &mut RgbaImage,
+        index: usize,
+    ) {
+        let number = self.setup.first_page + index;
+        let margin = MARGIN as i64;
+        let right = |img: &RgbaImage| PAGE_W as i64 - margin - img.width() as i64;
+        let header = match (self.setup.header(number), &self.manuscript) {
+            (Some(text), _) => Some((label(fs, cache, &text), margin)),
+            (None, Some(m)) if index > 0 => {
+                let text = format!("{} / {} / {number}", m.surname, m.title.to_uppercase());
+                let img = label(fs, cache, &text);
+                let x = right(&img);
+                Some((img, x))
+            }
+            _ => None,
+        };
+        if let Some((img, x)) = header {
+            let y = (margin - img.height() as i64) / 2;
+            imageops::replace(page, &img, x, y);
+        }
+        let footer = match self.setup.footer(number) {
+            Some(text) => Some((label(fs, cache, &text), false)),
+            None if self.manuscript.is_none() && !self.setup.omit_page_numbers => {
+                Some((label(fs, cache, &format!("- {number} -")), true))
+            }
+            None => None,
+        };
+        if let Some((img, centered)) = footer {
+            let x = if centered {
+                (PAGE_W as i64 - img.width() as i64) / 2
+            } else {
+                margin
+            };
+            let y = PAGE_H as i64 - margin + (margin - img.height() as i64) / 2;
+            imageops::replace(page, &img, x, y);
+        }
+    }
+}
+
+/// A one-line label (running header, footer, page number), cropped to its text.
+fn label(fs: &mut FontSystem, cache: &mut SwashCache, text: &str) -> RgbaImage {
+    let size = 17.0;
+    let mut buffer = text_buffer(fs, &[Seg::plain(text)], size, Family::SansSerif, CONTENT_W);
+    let (w, h) = buffer
+        .layout_runs()
+        .fold((0.0f32, 0.0f32), |(w, h), r| (w.max(r.line_w), h.max(r.line_top + r.line_height)));
+    let mut img = RgbaImage::from_pixel(w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32, Rgba(PAPER));
+    let col = Color::rgb(QUOTE[0], QUOTE[1], QUOTE[2]);
+    buffer.draw(fs, cache, col, |gx, gy, _, _, c| blend(&mut img, gx, gy, c));
+    img
 }
 
 fn heading_px(level: u8) -> f32 {
@@ -244,7 +344,14 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
                 HEADING,
             )
         }
-        Block::Para(segs) => text_strip(fs, cache, segs, BODY, Family::SansSerif, 0.0, TEXT),
+        Block::Para { segs, indent } => {
+            let mut segs = segs.clone();
+            if *indent && let Some(first) = segs.first_mut() {
+                // A first-line indent of about one em.
+                first.text.insert_str(0, "\u{A0}\u{A0}\u{A0}\u{A0}");
+            }
+            text_strip(fs, cache, &segs, BODY, Family::SansSerif, 0.0, TEXT)
+        }
         Block::Item {
             depth,
             marker,
@@ -270,6 +377,8 @@ fn build_strip(fs: &mut FontSystem, cache: &mut SwashCache, block: &Block) -> Rg
             text_strip(fs, cache, &italic, BODY, Family::Serif, 28.0, QUOTE)
         }
         Block::Rule => rule_strip(),
+        // Handled by the job before a strip is built; nothing to draw.
+        Block::PageBreak => RgbaImage::from_pixel(1, 1, Rgba(PAPER)),
         Block::Table { header, rows } => {
             let seg = Seg::plain(ascii_table(header, rows));
             text_strip(fs, cache, &[seg], BODY - 3.0, Family::Monospace, 0.0, TEXT)
@@ -343,9 +452,9 @@ fn rule_strip() -> RgbaImage {
     s
 }
 
-/// Stack the strips onto A4 pages, breaking between blocks (and slicing a block
-/// that is taller than a whole page).
-fn paginate(strips: &[RgbaImage]) -> Vec<RgbaImage> {
+/// Stack the strips onto A4 pages, breaking between blocks and at `.pa` (and
+/// slicing a block that is taller than a whole page).
+fn paginate(strips: &[Strip]) -> Vec<RgbaImage> {
     let margin = MARGIN as u32;
     let gap = (BODY * 0.55) as u32;
     let content_h = PAGE_H - 2 * margin;
@@ -356,6 +465,16 @@ fn paginate(strips: &[RgbaImage]) -> Vec<RgbaImage> {
     let mut y = margin;
 
     for strip in strips {
+        let (strip, gap) = match strip {
+            Strip::PageBreak => {
+                if y > margin {
+                    pages.push(std::mem::replace(&mut page, new_page()));
+                    y = margin;
+                }
+                continue;
+            }
+            Strip::Image { img, gap_after } => (img, if *gap_after { gap } else { 0 }),
+        };
         let sh = strip.height();
         if sh <= content_h {
             if y > margin && y + sh > margin + content_h {
@@ -527,6 +646,17 @@ mod tests {
             lines.iter().all(|l| l.chars().count() == w),
             "ragged table:\n{t}"
         );
+    }
+
+    #[test]
+    fn page_break_strip_starts_a_new_page() {
+        let img = || Strip::Image {
+            img: RgbaImage::from_pixel(10, 10, Rgba(PAPER)),
+            gap_after: true,
+        };
+        assert_eq!(paginate(&[img(), img()]).len(), 1);
+        assert_eq!(paginate(&[img(), Strip::PageBreak, img()]).len(), 2);
+        assert_eq!(paginate(&[Strip::PageBreak, img()]).len(), 1, "no blank first page");
     }
 
     #[test]
