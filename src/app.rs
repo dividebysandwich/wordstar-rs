@@ -8,10 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use std::cell::Cell;
-// `RefCell` only wraps the native image-protocol caches.
-#[cfg(not(target_arch = "wasm32"))]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use anyhow::Result;
 use crate::input::{
@@ -78,6 +75,8 @@ pub enum PromptKind {
     InsertFile,
     /// Jump to a page number.
     GoToPage,
+    /// Set the right margin (the wrap column), stored as a `.rm` dot command.
+    RightMargin,
 }
 
 /// Header vs. footer for the [`Mode::Header`] dialog.
@@ -171,6 +170,20 @@ pub enum AlignChoice {
     Justify,
 }
 
+/// A WordStar block marked with `^KB` … `^KK`. Its ends stay put while the
+/// cursor moves elsewhere, so it can be copied (`^KC`) or moved (`^KV`) there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkedBlock {
+    /// Start and end positions, `(row, col)` in characters, `start < end`.
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    /// The block's text when marked; if the text there changes, the block is
+    /// stale and dropped rather than acting on the wrong text.
+    pub text: String,
+    /// Hidden with `^KH`: kept, but neither highlighted nor acted on.
+    pub hidden: bool,
+}
+
 /// State backing the [`Mode::Prompt`] overlay.
 #[derive(Debug, Clone, Default)]
 pub struct PromptState {
@@ -225,6 +238,8 @@ pub struct App {
     pub wrap: bool,
     /// Persistent clipboard for block copy / cut / paste.
     pub block_buffer: String,
+    /// The marked block (`^KB` … `^KK`), if any.
+    pub marked: Option<MarkedBlock>,
     /// True while a block is being marked, so cursor movement extends the
     /// selection even with plain (un-shifted) movement keys.
     marking: bool,
@@ -261,7 +276,10 @@ pub struct App {
     /// Time + cell of the last mouse press, for double-click detection.
     last_click: Option<(f64, u16, u16)>,
     /// Screen geometry recorded during the last render, for mouse hit-testing.
+    /// `editor_area` is the text column; `editor_pane` also covers the blank
+    /// space right of the margin (but not the flag column or scrollbar).
     pub editor_area: Cell<Rect>,
+    pub editor_pane: Cell<Rect>,
     pub menu_bar_area: Cell<Rect>,
     pub dropdown_area: Cell<Rect>,
     /// Geometry of the open submenu panel, for mouse hit-testing.
@@ -270,6 +288,10 @@ pub struct App {
     /// First visible visual row of the editor viewport, tracked across frames so
     /// the scrollbar thumb reflects the textarea's internal scroll position.
     pub scroll_top: Cell<usize>,
+    /// The wrapped layout of the document at the current text width, rebuilt by
+    /// the renderer each frame, and the printed `(page, line)` of every row.
+    pub visual_rows: RefCell<Vec<crate::wrap::VisualRow>>,
+    pub row_pages: RefCell<Vec<(usize, usize)>>,
     /// Action to finish once a pending Save As completes (e.g. quit after naming
     /// an untitled document).
     after_save: Option<AfterSave>,
@@ -334,6 +356,7 @@ impl App {
             align: AlignChoice::Left,
             wrap: true,
             block_buffer: String::new(),
+            marked: None,
             marking: false,
             #[cfg(not(target_arch = "wasm32"))]
             picker: None,
@@ -354,11 +377,14 @@ impl App {
             mouse_selecting: false,
             last_click: None,
             editor_area: Cell::new(Rect::ZERO),
+            editor_pane: Cell::new(Rect::ZERO),
             menu_bar_area: Cell::new(Rect::ZERO),
             dropdown_area: Cell::new(Rect::ZERO),
             sub_dropdown_area: Cell::new(Rect::ZERO),
             browser_list_area: Cell::new(Rect::ZERO),
             scroll_top: Cell::new(0),
+            visual_rows: RefCell::new(Vec::new()),
+            row_pages: RefCell::new(Vec::new()),
             after_save: None,
             compound_undo: None,
             #[cfg(target_arch = "wasm32")]
@@ -736,6 +762,18 @@ impl App {
                 let name = self.prompt.input.clone();
                 self.mode = Mode::Editor;
                 self.insert_file(&name);
+            }
+            PromptKind::RightMargin => {
+                let raw = self.prompt.input.trim().to_string();
+                self.mode = Mode::Editor;
+                match raw.parse::<usize>() {
+                    Ok(n) if (MIN_RIGHT_MARGIN..=MAX_RIGHT_MARGIN).contains(&n) => {
+                        self.set_right_margin(n)
+                    }
+                    _ => self.set_status(format!(
+                        "Right margin must be a column from {MIN_RIGHT_MARGIN} to {MAX_RIGHT_MARGIN}."
+                    )),
+                }
             }
             PromptKind::GoToPage => {
                 let raw = self.prompt.input.trim().to_string();
@@ -1303,58 +1341,103 @@ impl App {
     // Block operations (mapped onto the text widget's selection + yank buffer)
     // ------------------------------------------------------------------
 
-    /// `^KB` — mark the start of a block (begin selecting at the cursor).
+    /// `^KB` — mark the start of a block: a live selection grows from here as the
+    /// cursor moves, until `^KK` fixes the block's end.
     pub fn block_begin(&mut self) {
+        self.marked = None;
         self.textarea.cancel_selection();
         self.textarea.start_selection();
         self.marking = true;
-        self.set_status("Block start marked — move the cursor, then ^KC copy / ^KY cut.");
+        self.set_status("Block start marked — move to the end of the block and press ^KK.");
     }
 
-    /// `^KK` — mark the end of the block (the selection runs start → cursor).
+    /// `^KK` — mark the end of the block. The block then stays marked where it is
+    /// (and is copied to the block buffer) while the cursor moves elsewhere, so
+    /// it can be copied (`^KC`) or moved (`^KV`) to the cursor, WordStar-style.
     pub fn block_end(&mut self) {
-        match self.selected_text() {
-            Some(text) => {
-                let n = text.chars().count();
-                self.set_status(format!(
-                    "Block marked: {n} chars.  ^KC copy · ^KY cut · ^KH clear"
-                ));
-            }
-            None => self.set_status("Mark the block start first with ^KB."),
-        }
+        let Some((start, end)) = self.textarea.selection_range().filter(|(s, e)| s != e) else {
+            self.set_status("Mark the block start first with ^KB.");
+            return;
+        };
+        let text = self.text_between(start, end).unwrap_or_default();
+        let n = text.chars().count();
+        self.block_buffer = text.clone();
+        self.marked = Some(MarkedBlock {
+            start,
+            end,
+            text,
+            hidden: false,
+        });
+        self.clear_marking();
+        self.set_status(format!(
+            "Block marked: {n} chars.  Move the cursor, then ^KC copy · ^KV move · ^KY delete · ^KH hide"
+        ));
     }
 
-    /// `^KC` — copy the marked block to the block clipboard.
+    /// `^KC` — copy. A live selection (mouse, or a block still being marked) is
+    /// copied to the block buffer; a marked block is copied to the cursor.
     pub fn block_copy(&mut self) {
-        match self.selected_text() {
-            Some(text) => {
-                let n = text.chars().count();
-                self.block_buffer = text;
-                self.clear_marking();
-                self.set_status(format!(
-                    "Copied {n} chars — move the cursor and press ^KV to paste."
-                ));
-            }
-            None => self.set_status("No block marked. Press ^KB, then move the cursor."),
+        if let Some(text) = self.selected_text() {
+            let n = text.chars().count();
+            self.block_buffer = text;
+            self.clear_marking();
+            self.set_status(format!(
+                "Copied {n} chars — move the cursor and press ^KV to paste."
+            ));
+            return;
         }
+        let Some(block) = self.active_block() else {
+            return;
+        };
+        let at = self.cursor_pos();
+        self.textarea.insert_str(&block.text);
+        let end = self.cursor_pos();
+        self.textarea.move_cursor(jump(at));
+        self.modified = true;
+        self.block_buffer = block.text.clone();
+        self.marked = Some(MarkedBlock {
+            start: at,
+            end,
+            ..block
+        });
+        self.set_status("Block copied to the cursor.");
     }
 
-    /// `^KY` — cut the marked block to the clipboard and remove it.
+    /// `^KY` — delete. A live selection or a marked block is removed and kept in
+    /// the block buffer, so `^KV` can paste it back.
     pub fn block_delete(&mut self) {
-        match self.selected_text() {
-            Some(text) => {
-                let n = text.chars().count();
-                self.block_buffer = text;
-                self.edit(|t| t.cut());
-                self.clear_marking();
-                self.set_status(format!("Cut {n} chars — press ^KV to paste."));
-            }
-            None => self.set_status("No block marked. Press ^KB, then move the cursor."),
+        if let Some(text) = self.selected_text() {
+            let n = text.chars().count();
+            self.block_buffer = text;
+            self.edit(|t| t.cut());
+            self.clear_marking();
+            self.set_status(format!("Cut {n} chars — press ^KV to paste."));
+            return;
         }
+        let Some(block) = self.active_block() else {
+            return;
+        };
+        self.delete_range(block.start, block.end);
+        self.textarea.move_cursor(jump(block.start));
+        self.set_status(format!(
+            "Deleted the block ({} chars) — ^KV pastes it.",
+            block.text.chars().count()
+        ));
+        self.block_buffer = block.text;
+        self.marked = None;
     }
 
-    /// `^KV` — paste the block clipboard at the cursor.
+    /// `^KV` — move a marked block to the cursor; with no marked block, paste the
+    /// block buffer at the cursor.
     pub fn block_move(&mut self) {
+        if !self.textarea.is_selecting()
+            && self.marked.as_ref().is_some_and(|b| !b.hidden)
+        {
+            if let Some(block) = self.active_block() {
+                self.move_block_to_cursor(block);
+            }
+            return;
+        }
         if self.block_buffer.is_empty() {
             self.set_status("Block clipboard is empty. Copy (^KC) or cut (^KY) a block first.");
             return;
@@ -1368,10 +1451,97 @@ impl App {
         self.set_status(format!("Pasted {n} chars at the cursor."));
     }
 
-    /// `^KH` — clear the block markers (cancel the selection).
+    /// Move `block` to the cursor; the cursor ends at the start of the moved text.
+    fn move_block_to_cursor(&mut self, block: MarkedBlock) {
+        let cur = self.cursor_pos();
+        if block.start <= cur && cur <= block.end {
+            self.set_status("The cursor is inside the block — move it elsewhere first.");
+            ring_bell();
+            return;
+        }
+        let len = block.text.chars().count();
+        let cur_off = pos_to_offset(self.textarea.lines(), cur);
+        let new_off = if cur > block.end {
+            // Insert first so the block's own position is still valid, then
+            // delete it; the inserted copy shifts left by the block's length.
+            self.textarea.insert_str(&block.text);
+            self.delete_range(block.start, block.end);
+            cur_off - len
+        } else {
+            self.delete_range(block.start, block.end);
+            self.textarea.move_cursor(jump(cur));
+            self.textarea.insert_str(&block.text);
+            cur_off
+        };
+        let lines = self.textarea.lines();
+        let start = offset_to_pos(lines, new_off);
+        let end = offset_to_pos(lines, new_off + len);
+        self.textarea.move_cursor(jump(start));
+        self.modified = true;
+        self.marked = Some(MarkedBlock { start, end, ..block });
+        self.set_status("Block moved to the cursor.");
+    }
+
+    /// `^KH` — hide or redisplay the marked block (a live selection is dropped).
     pub fn block_hide(&mut self) {
-        self.clear_marking();
-        self.set_status("Block markers cleared.");
+        if self.textarea.is_selecting() || self.marking {
+            self.clear_marking();
+            self.set_status("Block markers cleared.");
+            return;
+        }
+        match self.marked.as_mut() {
+            Some(b) => {
+                b.hidden = !b.hidden;
+                let shown = !b.hidden;
+                self.set_status(if shown {
+                    "Block displayed."
+                } else {
+                    "Block hidden — ^KH shows it again."
+                });
+            }
+            None => self.set_status("No block marked."),
+        }
+    }
+
+    /// `^QB` / `^QK` — jump to the beginning or end of the marked block.
+    pub fn goto_block(&mut self, end: bool) {
+        match &self.marked {
+            Some(b) => {
+                let pos = if end { b.end } else { b.start };
+                self.clear_marking();
+                self.textarea.move_cursor(jump(pos));
+            }
+            None => self.set_status("No block marked. Mark one with ^KB … ^KK."),
+        }
+    }
+
+    /// The marked block, if it is displayed and still where it was marked. A
+    /// block whose text was edited since is dropped, with an explanation.
+    fn active_block(&mut self) -> Option<MarkedBlock> {
+        match self.marked.clone() {
+            Some(b) if b.hidden => {
+                self.set_status("The block is hidden — ^KH displays it again.");
+                None
+            }
+            Some(b) if self.text_between(b.start, b.end).as_deref() == Some(&b.text) => Some(b),
+            Some(_) => {
+                self.marked = None;
+                self.set_status("The text changed since the block was marked — mark it again (^KB … ^KK).");
+                ring_bell();
+                None
+            }
+            None => {
+                self.set_status("No block marked. Press ^KB, move the cursor, then ^KK.");
+                None
+            }
+        }
+    }
+
+    /// The marked block if it should be highlighted: displayed, and unchanged.
+    pub fn visible_block(&self) -> Option<&MarkedBlock> {
+        self.marked
+            .as_ref()
+            .filter(|b| !b.hidden && self.text_between(b.start, b.end).as_deref() == Some(&b.text))
     }
 
     /// Stop marking and drop any active selection highlight.
@@ -1380,26 +1550,88 @@ impl App {
         self.textarea.cancel_selection();
     }
 
+    /// Select the visible marked block (if there is no live selection), so a
+    /// formatting command can act on it. Returns whether text is selected.
+    fn select_block_for_format(&mut self) -> bool {
+        self.marking = false;
+        if self.textarea.is_selecting() {
+            return true;
+        }
+        let Some(b) = self.visible_block().cloned() else {
+            return false;
+        };
+        self.marked = None;
+        self.textarea.move_cursor(jump(b.start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(b.end));
+        true
+    }
+
+    /// Delete the text between two positions as one undoable edit.
+    fn delete_range(&mut self, start: (usize, usize), end: (usize, usize)) {
+        if start == end {
+            return;
+        }
+        self.textarea.cancel_selection();
+        self.textarea.move_cursor(jump(start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(end));
+        // With a selection active this deletes exactly it, without yanking.
+        if self.textarea.delete_line_by_end() {
+            self.modified = true;
+        }
+    }
+
+    /// The cursor as a plain `(row, col)`.
+    fn cursor_pos(&self) -> (usize, usize) {
+        let c = self.textarea.cursor();
+        (c.0, c.1)
+    }
+
     /// The currently selected text, if any (used for block copy/cut).
     fn selected_text(&self) -> Option<String> {
-        let ((sr, sc), (er, ec)) = self.textarea.selection_range()?;
-        if (sr, sc) == (er, ec) {
+        let (start, end) = self.textarea.selection_range()?;
+        if start == end {
             return None; // empty selection
         }
+        self.text_between(start, end)
+    }
+
+    /// The text from `start` to `end` (character positions, `start <= end`), or
+    /// `None` if either lies outside the document.
+    fn text_between(&self, (sr, sc): (usize, usize), (er, ec): (usize, usize)) -> Option<String> {
         let lines = self.textarea.lines();
-        if sr == er {
-            let line = &lines[sr];
-            Some(line.chars().skip(sc).take(ec - sc).collect())
-        } else {
-            let mut out: String = lines[sr].chars().skip(sc).collect();
-            out.push('\n');
-            for line in &lines[sr + 1..er] {
-                out.push_str(line);
-                out.push('\n');
-            }
-            out.extend(lines[er].chars().take(ec));
-            Some(out)
+        let len = |r: usize| lines.get(r).map(|l| l.chars().count());
+        if sc > len(sr)? || ec > len(er)? || (sr, sc) > (er, ec) {
+            return None;
         }
+        if sr == er {
+            return Some(lines[sr].chars().skip(sc).take(ec - sc).collect());
+        }
+        let mut out: String = lines[sr].chars().skip(sc).collect();
+        out.push('\n');
+        for line in &lines[sr + 1..er] {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.extend(lines[er].chars().take(ec));
+        Some(out)
+    }
+
+    /// `^Y` — delete the whole line the cursor is on, its text and its line
+    /// break, as one undoable edit; the cursor lands at the start of what was
+    /// the next line.
+    pub fn delete_line(&mut self) {
+        let row = self.cursor_pos().0;
+        let lines = self.textarea.lines();
+        let end = if row + 1 < lines.len() {
+            (row + 1, 0)
+        } else {
+            (row, lines[row].chars().count())
+        };
+        self.clear_marking();
+        self.delete_range((row, 0), end);
+        self.textarea.move_cursor(jump((row, 0)));
     }
 
     /// Run an editing closure, marking the buffer modified if it changed.
@@ -1422,10 +1654,20 @@ impl App {
     /// markdown markers. With no selection the cursor is left between the markers
     /// so the next typed text is formatted.
     pub fn apply_format(&mut self, open: &str, close: &str, label: &str) {
-        if self.textarea.is_selecting() {
+        if self.select_block_for_format() {
             self.textarea.cut();
             let inner = self.textarea.yank_text();
-            self.textarea.insert_str(format!("{open}{inner}{close}"));
+            // Markdown emphasis can't start or end with whitespace (`**word **`
+            // stays literal), so keep surrounding spaces outside the markers.
+            let core = inner.trim();
+            let wrapped = if core.is_empty() {
+                format!("{open}{inner}{close}")
+            } else {
+                let lead = &inner[..inner.len() - inner.trim_start().len()];
+                let trail = &inner[inner.trim_end().len()..];
+                format!("{lead}{open}{core}{close}{trail}")
+            };
+            self.textarea.insert_str(wrapped);
             self.set_status(format!("{label} applied to selection."));
         } else {
             self.textarea.insert_str(format!("{open}{close}"));
@@ -1439,7 +1681,7 @@ impl App {
 
     /// Strip inline formatting markers from the selected text.
     pub fn clear_formatting(&mut self) {
-        if self.textarea.is_selecting() {
+        if self.select_block_for_format() {
             self.textarea.cut();
             let inner = self.textarea.yank_text();
             let cleaned = crate::attributes::strip_inline_markers(&inner);
@@ -1468,8 +1710,9 @@ impl App {
     /// `^N` — insert a hard return at the cursor, leaving the cursor in place
     /// (opens a new line below the current text position).
     pub fn insert_line(&mut self) {
+        let at = self.cursor_pos();
         self.textarea.insert_newline();
-        self.textarea.move_cursor(CursorMove::Up);
+        self.textarea.move_cursor(jump(at));
         self.modified = true;
     }
 
@@ -1541,15 +1784,87 @@ impl App {
         };
     }
 
-    /// Jump the cursor to the first line of the given 1-based page (55 lines/page,
-    /// matching the status-line page metric).
+    /// Jump the cursor to the first printed line of the given 1-based page, using
+    /// the same pagination as the status line (wrapped rows, `.pa` breaks).
     fn goto_page(&mut self, page: usize) {
         let page = page.max(1);
-        let target =
-            ((page - 1) * LINES_PER_PAGE).min(self.textarea.lines().len().saturating_sub(1));
+        let target = {
+            let rows = self.visual_rows.borrow();
+            let pages = self.row_pages.borrow();
+            let lines = self.textarea.lines();
+            let idx = pages
+                .iter()
+                .position(|&(p, _)| p >= page)
+                .or_else(|| pages.len().checked_sub(1));
+            idx.and_then(|i| rows.get(i))
+                .map(|r| (r.line, r.start_col(lines)))
+        };
+        match target {
+            Some(pos) => self.textarea.move_cursor(jump(pos)),
+            // No layout yet (nothing rendered): fall back to logical lines.
+            None => self
+                .textarea
+                .move_cursor(jump(((page - 1) * LINES_PER_PAGE, 0))),
+        }
+        let reached = self.cursor_metrics().page;
+        if reached < page {
+            self.set_status(format!("The document ends on page {reached}."));
+        } else {
+            self.set_status(format!("Page {page}."));
+        }
+    }
+
+    /// Open the right-margin prompt (`^OR`), pre-filled with the current margin.
+    pub fn start_right_margin(&mut self) {
+        self.mode = Mode::Prompt;
+        self.prompt = PromptState {
+            kind: PromptKind::RightMargin,
+            label: "Right margin (column):".into(),
+            input: self.right_margin().to_string(),
+            pending_find: None,
+        };
+    }
+
+    /// The right margin — the column text wraps at: the document's first `.rm N`
+    /// dot command, or WordStar's default of 65.
+    pub fn right_margin(&self) -> usize {
         self.textarea
-            .move_cursor(CursorMove::Jump(target as u16, 0));
-        self.set_status(format!("Page {page}."));
+            .lines()
+            .iter()
+            .find_map(|l| right_margin_command(l))
+            .unwrap_or(DEFAULT_RIGHT_MARGIN)
+    }
+
+    /// Store a new right margin as a `.rm` dot command: rewrite the existing one,
+    /// or add it at the top of the document. The cursor stays on its text.
+    fn set_right_margin(&mut self, margin: usize) {
+        let cursor = self.textarea.cursor();
+        let existing = self
+            .textarea
+            .lines()
+            .iter()
+            .position(|l| right_margin_command(l).is_some());
+        let dot = format!(".rm {margin}");
+        self.clear_marking();
+        match existing {
+            Some(row) => {
+                let len = self.textarea.lines()[row].chars().count();
+                self.textarea.move_cursor(jump((row, 0)));
+                self.textarea.start_selection();
+                self.textarea.move_cursor(jump((row, len)));
+                self.textarea.insert_str(&dot);
+                self.textarea.move_cursor(jump((cursor.0, cursor.1)));
+            }
+            None => {
+                self.textarea.move_cursor(CursorMove::Top);
+                self.textarea.move_cursor(CursorMove::Head);
+                self.textarea.insert_str(&dot);
+                self.textarea.insert_newline();
+                self.textarea.move_cursor(jump((cursor.0 + 1, cursor.1)));
+            }
+        }
+        self.modified = true;
+        self.set_status(format!("Right margin: column {margin}."));
     }
 
     /// Open the header / footer dialog.
@@ -2030,10 +2345,31 @@ impl App {
         self.guard_unsaved(AfterSave::Quit);
     }
 
-    /// Insert pasted text.
+    /// Insert pasted text (terminal bracketed paste, or the browser's paste
+    /// event) where the user is typing: into the document as a single undoable
+    /// edit, or into the open prompt or dialog (first line only).
     pub fn handle_paste(&mut self, text: String) {
-        if self.textarea.insert_str(text) {
-            self.modified = true;
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let first_line = text.lines().next().unwrap_or("");
+        match self.mode {
+            Mode::Editor => {
+                self.marking = false;
+                if self.textarea.insert_str(&text) {
+                    self.modified = true;
+                }
+            }
+            Mode::Prompt => self.prompt.input.push_str(first_line),
+            Mode::Header => {
+                if let Some(h) = self.header_dialog.as_mut() {
+                    h.text.push_str(first_line);
+                }
+            }
+            Mode::Calculator => {
+                if let Some(c) = self.calc.as_mut() {
+                    c.input.push_str(first_line);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2073,10 +2409,10 @@ impl App {
                     return;
                 }
                 // Otherwise position the cursor / begin a selection.
-                if let Some((r, c)) = self.editor_doc_pos(me.column, me.row) {
+                if let Some(pos) = self.editor_doc_pos(me.column, me.row) {
                     let double = self.register_click(me.column, me.row);
                     self.textarea.cancel_selection();
-                    self.textarea.move_cursor(CursorMove::Jump(r, c));
+                    self.textarea.move_cursor(jump(pos));
                     if double {
                         self.select_word();
                         self.mouse_selecting = false;
@@ -2088,9 +2424,9 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.mouse_selecting
-                    && let Some((r, c)) = self.editor_doc_pos(me.column, me.row)
+                    && let Some(pos) = self.editor_doc_pos(me.column, me.row)
                 {
-                    self.textarea.move_cursor(CursorMove::Jump(r, c));
+                    self.textarea.move_cursor(jump(pos));
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -2286,25 +2622,41 @@ impl App {
         self.scroll_top.set((top + rows).max(0) as usize);
     }
 
-    /// Map an editor-area click to a document `(row, col)`, using the cursor's
-    /// known screen position to recover the scroll offset.
-    fn editor_doc_pos(&self, mx: u16, my: u16) -> Option<(u16, u16)> {
+    /// Map a click in the editor pane to a document `(row, col)` through the
+    /// wrapped layout of the last render: the visual row under the pointer (the
+    /// viewport's top row plus the offset), then the character at that column.
+    /// Clicks right of the text, or below the end, land at the nearest position.
+    fn editor_doc_pos(&self, mx: u16, my: u16) -> Option<(usize, usize)> {
+        let pane = self.editor_pane.get();
         let area = self.editor_area.get();
         if area.width == 0
-            || my < area.y
-            || my >= area.y + area.height
-            || mx < area.x
-            || mx >= area.x + area.width
+            || my < pane.y
+            || my >= pane.y + pane.height
+            || mx < pane.x
+            || mx >= pane.x + pane.width
         {
             return None;
         }
-        let wrow = (my - area.y) as usize;
-        let wcol = (mx - area.x) as usize;
-        let sc = self.textarea.screen_cursor();
-        let dc = self.textarea.cursor();
-        let top = dc.0.saturating_sub(sc.row);
-        let left = dc.1.saturating_sub(sc.col);
-        Some(((top + wrow) as u16, (left + wcol) as u16))
+        let rows = self.visual_rows.borrow();
+        let lines = self.textarea.lines();
+        let tab = self.textarea.tab_length();
+        let v = self.scroll_top.get() + (my - area.y) as usize;
+        let Some(row) = rows.get(v) else {
+            // Below the end of the document: the end of the last line.
+            let last = lines.len().saturating_sub(1);
+            return Some((last, lines[last].chars().count()));
+        };
+        let text = row.text(lines);
+        let len = text.chars().count();
+        let offset = self.row_offset(text, area.width as usize);
+        let x = ((mx - area.x) as usize).saturating_sub(offset);
+        let mut col = crate::wrap::x_to_char(text, x, tab);
+        // Just past the end of a wrapped row is the start of the next one; stay on
+        // this row (normally on the space it ends with).
+        if !row.last && col >= len && len > 0 {
+            col = len - 1;
+        }
+        Some((row.line, row.start_col(lines) + col))
     }
 
     /// Select the word under the cursor (double-click).
@@ -2350,18 +2702,90 @@ impl App {
         self.status_msg = Some(msg.into());
     }
 
-    /// Cursor metrics for the status line, in WordStar units.
+    /// Where a visual row's `text` starts within a text column `width` cells
+    /// wide, given the paragraph alignment (centered / right-aligned rows are
+    /// shifted right).
+    pub fn row_offset(&self, text: &str, width: usize) -> usize {
+        let used = crate::wrap::char_to_x(text, text.chars().count(), self.textarea.tab_length());
+        match self.textarea.alignment() {
+            Alignment::Center => width.saturating_sub(used) / 2,
+            Alignment::Right => width.saturating_sub(used),
+            Alignment::Left => 0,
+        }
+    }
+
+    /// Rebuild the wrapped layout for a text column `width` cells wide, and the
+    /// printed page/line of every row. Called by the renderer once per frame.
+    pub fn refresh_layout(&self, width: usize) {
+        let lines = self.textarea.lines();
+        let rows = crate::wrap::layout(
+            lines,
+            self.textarea.wrap_mode(),
+            width,
+            self.textarea.tab_length(),
+        );
+        *self.row_pages.borrow_mut() = page_layout(&rows, lines);
+        *self.visual_rows.borrow_mut() = rows;
+    }
+
+    /// Index of the visual row holding the cursor, from the cached layout.
+    pub fn cursor_row_index(&self) -> Option<usize> {
+        let (line, col) = {
+            let c = self.textarea.cursor();
+            (c.0, c.1)
+        };
+        let rows = self.visual_rows.borrow();
+        let lines = self.textarea.lines();
+        let first = rows.partition_point(|r| r.line < line);
+        let mut found = None;
+        for (i, r) in rows.iter().enumerate().skip(first) {
+            if r.line != line || r.start_col(lines) > col {
+                break;
+            }
+            found = Some(i);
+        }
+        found
+    }
+
+    /// The cursor's printed column within its visual row (formatting markers
+    /// don't count), 0-based. Drives the ruler indicator and the status line.
+    pub fn cursor_visible_column(&self) -> usize {
+        let (line_idx, col) = {
+            let c = self.textarea.cursor();
+            (c.0, c.1)
+        };
+        let line = self
+            .textarea
+            .lines()
+            .get(line_idx)
+            .map(String::as_str)
+            .unwrap_or("");
+        let row_start = self
+            .cursor_row_index()
+            .and_then(|i| self.visual_rows.borrow().get(i).copied())
+            .map_or(0, |r| r.start_col(self.textarea.lines()));
+        crate::attributes::visible_column(line, col)
+            - crate::attributes::visible_column(line, row_start)
+    }
+
+    /// Cursor metrics for the status line, in WordStar units: the page and line
+    /// on it as printed (wrapped rows, `.pa` page breaks, 54 lines a page), and
+    /// the column within the printed line.
     pub fn cursor_metrics(&self) -> CursorMetrics {
-        let cursor = self.textarea.cursor();
-        let line = cursor.0; // 0-based row
-        let col = cursor.1; // 0-based column
+        let (page, line) = match self.cursor_row_index() {
+            Some(i) => self.row_pages.borrow()[i],
+            None => {
+                let row = self.textarea.cursor().0;
+                (row / LINES_PER_PAGE + 1, row % LINES_PER_PAGE + 1)
+            }
+        };
+        let col = self.cursor_visible_column();
         CursorMetrics {
-            line: line + 1,
+            line,
             column: col + 1,
-            // Page: ~54 text lines per page (9" at 6 lines/inch).
-            page: line / LINES_PER_PAGE + 1,
+            page,
             // Vertical position: 0.5" top margin + 6 lines/inch.
-            vertical_inches: 0.5 + line as f32 / 6.0,
+            vertical_inches: 0.5 + (line - 1) as f32 / 6.0,
             // Horizontal position: 10 chars/inch (pica).
             horizontal_inches: col as f32 / 10.0,
         }
@@ -2388,6 +2812,52 @@ enum OverlayKind {
 /// status-line page metric and "go to page".
 const LINES_PER_PAGE: usize = 54;
 
+/// WordStar's default right margin (the column text wraps at), and the range
+/// `^OR` accepts.
+pub const DEFAULT_RIGHT_MARGIN: usize = 65;
+const MIN_RIGHT_MARGIN: usize = 20;
+const MAX_RIGHT_MARGIN: usize = 250;
+
+/// The column set by a `.rm N` (right margin) dot command, if `line` is one.
+fn right_margin_command(line: &str) -> Option<usize> {
+    let rest = line.get(..3)?.eq_ignore_ascii_case(".rm").then(|| &line[3..])?;
+    rest.trim()
+        .parse()
+        .ok()
+        .map(|n: usize| n.clamp(MIN_RIGHT_MARGIN, MAX_RIGHT_MARGIN))
+}
+
+/// True for a `.pa` (new page) dot command.
+pub fn is_page_break(line: &str) -> bool {
+    line.trim_end().eq_ignore_ascii_case(".pa")
+}
+
+/// The printed `(page, line)` of every visual row, both 1-based: pages hold
+/// [`LINES_PER_PAGE`] printed lines, `.pa` starts a new page, and other dot
+/// commands don't print (they report the line the next text would go on).
+fn page_layout(rows: &[crate::wrap::VisualRow], lines: &[String]) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(rows.len());
+    let (mut page, mut used) = (1usize, 0usize);
+    for r in rows {
+        let text = lines.get(r.line).map(String::as_str).unwrap_or("");
+        if crate::attributes::is_dot_command(text) {
+            out.push((page, used + 1));
+            if is_page_break(text) && used > 0 {
+                page += 1;
+                used = 0;
+            }
+            continue;
+        }
+        if used == LINES_PER_PAGE {
+            page += 1;
+            used = 0;
+        }
+        used += 1;
+        out.push((page, used));
+    }
+    out
+}
+
 /// The `(row, col)` of character `offset` in `chars`, a buffer joined with `\n`.
 fn char_pos(chars: &[char], offset: usize) -> (usize, usize) {
     let (mut row, mut col) = (0, 0);
@@ -2400,6 +2870,28 @@ fn char_pos(chars: &[char], offset: usize) -> (usize, usize) {
         }
     }
     (row, col)
+}
+
+/// The absolute character offset of `(row, col)` in `lines` joined with `\n`.
+fn pos_to_offset(lines: &[String], (row, col): (usize, usize)) -> usize {
+    lines[..row.min(lines.len())]
+        .iter()
+        .map(|l| l.chars().count() + 1)
+        .sum::<usize>()
+        + col
+}
+
+/// The `(row, col)` of absolute character `offset` in `lines` joined with `\n`.
+fn offset_to_pos(lines: &[String], mut offset: usize) -> (usize, usize) {
+    for (row, line) in lines.iter().enumerate() {
+        let len = line.chars().count();
+        if offset <= len {
+            return (row, offset);
+        }
+        offset -= len + 1;
+    }
+    let last = lines.len().saturating_sub(1);
+    (last, lines.get(last).map_or(0, |l| l.chars().count()))
 }
 
 /// A cursor jump to `(row, col)`, saturating at the widget's `u16` coordinates.
@@ -2829,6 +3321,166 @@ mod tests {
         assert_eq!(app.textarea.lines(), ["a"]);
         commands::execute(&mut app, commands::Command::Undo);
         assert_eq!(app.textarea.lines(), ["ab"], "one undo, not two");
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    /// Press a two-key WordStar chord such as `^K` `K`.
+    fn chord(app: &mut App, prefix: char, c: char) {
+        app.handle_key(ctrl(prefix));
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+
+    #[test]
+    fn ctrl_y_deletes_the_whole_line_in_one_press_and_one_undo() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("one\ntwo\nthree");
+        app.textarea.move_cursor(CursorMove::Jump(1, 2));
+        app.handle_key(ctrl('y'));
+        assert_eq!(app.textarea.lines(), ["one", "three"]);
+        assert_eq!(app.textarea.cursor(), (1, 0));
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["one", "two", "three"]);
+        // The last line is cleared rather than joined to the one above.
+        app.textarea.move_cursor(CursorMove::Bottom);
+        app.handle_key(ctrl('y'));
+        assert_eq!(app.textarea.lines(), ["one", "two", ""]);
+    }
+
+    #[test]
+    fn ctrl_n_splits_the_line_but_leaves_the_cursor_in_place() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("helloworld");
+        app.textarea.move_cursor(CursorMove::Jump(0, 5));
+        app.handle_key(ctrl('n'));
+        assert_eq!(app.textarea.lines(), ["hello", "world"]);
+        assert_eq!(app.textarea.cursor(), (0, 5));
+    }
+
+    /// "The quick brown fox." with `quick ` marked as a block via ^KB … ^KK.
+    fn marked_quick() -> App {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("The quick brown fox.");
+        app.textarea.move_cursor(CursorMove::Jump(0, 4));
+        chord(&mut app, 'k', 'b');
+        for _ in 0..6 {
+            app.handle_key(key(KeyCode::Right));
+        }
+        chord(&mut app, 'k', 'k');
+        app
+    }
+
+    #[test]
+    fn ctrl_kk_fixes_the_block_so_the_cursor_can_move_away() {
+        let mut app = marked_quick();
+        assert_eq!(app.block_buffer, "quick ", "^KK copies the block, as documented");
+        assert!(!app.textarea.is_selecting(), "the widget selection is replaced");
+        // Moving on no longer stretches the block.
+        app.handle_key(key(KeyCode::End));
+        let b = app.marked.as_ref().unwrap();
+        assert_eq!((b.start, b.end), ((0, 4), (0, 10)));
+    }
+
+    #[test]
+    fn ctrl_kv_moves_the_marked_block_to_the_cursor() {
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::Jump(0, 16)); // before "fox"
+        chord(&mut app, 'k', 'v');
+        assert_eq!(app.textarea.lines(), ["The brown quick fox."]);
+        assert_eq!(app.textarea.cursor(), (0, 10), "cursor at the moved block");
+        // Moving it back to the front (cursor before the block).
+        app.textarea.move_cursor(CursorMove::Head);
+        chord(&mut app, 'k', 'v');
+        assert_eq!(app.textarea.lines(), ["quick The brown fox."]);
+    }
+
+    #[test]
+    fn ctrl_kc_copies_the_marked_block_to_the_cursor() {
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'c');
+        assert_eq!(app.textarea.lines(), ["The quick brown fox.quick "]);
+    }
+
+    #[test]
+    fn a_block_edited_after_marking_is_not_acted_on() {
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::Head);
+        type_str(&mut app, "X");
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'v');
+        assert_eq!(app.textarea.lines(), ["XThe quick brown fox."], "nothing moved");
+        assert!(app.marked.is_none());
+        assert!(app.status_msg.as_deref().unwrap().contains("mark it again"));
+    }
+
+    #[test]
+    fn ctrl_ky_deletes_the_marked_block_and_ctrl_kv_pastes_it_back() {
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'y');
+        assert_eq!(app.textarea.lines(), ["The brown fox."]);
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'v');
+        assert_eq!(app.textarea.lines(), ["The brown fox.quick "]);
+    }
+
+    #[test]
+    fn bold_applies_to_the_marked_block() {
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'p', 'b');
+        assert_eq!(app.textarea.lines(), ["The **quick** brown fox."]);
+        // Arrows after formatting move the cursor rather than select.
+        app.handle_key(key(KeyCode::Right));
+        assert!(!app.textarea.is_selecting());
+    }
+
+    #[test]
+    fn right_margin_is_stored_as_a_dot_command() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("text");
+        assert_eq!(app.right_margin(), DEFAULT_RIGHT_MARGIN);
+        chord(&mut app, 'o', 'r');
+        app.prompt.input = "72".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.textarea.lines(), [".rm 72", "text"]);
+        assert_eq!(app.right_margin(), 72);
+        assert_eq!(app.textarea.cursor(), (1, 4), "cursor stays on its text");
+        // Setting it again rewrites the same line.
+        app.start_right_margin();
+        app.prompt.input = "50".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.textarea.lines(), [".rm 50", "text"]);
+    }
+
+    #[test]
+    fn pages_count_wrapped_rows_and_honor_page_breaks() {
+        use crate::wrap::VisualRow;
+        let lines: Vec<String> = vec!["a".into(), ".pa".into(), "b".into()];
+        let row = |line| VisualRow { line, start: 0, end: 1, last: true };
+        let pages = page_layout(&[row(0), row(1), row(2)], &lines);
+        assert_eq!(pages, [(1, 1), (1, 2), (2, 1)]);
+        // 60 printed rows overflow the 54-line page.
+        let lines = vec!["x".to_string(); 60];
+        let rows: Vec<VisualRow> = (0..60).map(row).collect();
+        let pages = page_layout(&rows, &lines);
+        assert_eq!(pages[53], (1, 54));
+        assert_eq!(pages[54], (2, 1));
+    }
+
+    #[test]
+    fn paste_goes_to_the_open_prompt() {
+        let mut app = App::new(None).unwrap();
+        app.start_find();
+        app.handle_paste("Anne\r\nsecond line".into());
+        assert_eq!(app.prompt.input, "Anne");
+        assert_eq!(app.textarea.lines(), [""], "the document is untouched");
+        app.mode = Mode::Editor;
+        app.handle_paste("a\r\nb".into());
+        assert_eq!(app.textarea.lines(), ["a", "b"]);
     }
 
     #[test]

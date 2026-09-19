@@ -64,9 +64,16 @@ L----!----!----!----!----!----!----!----R----!----   <- ruler
 - **Style bar** — the paragraph style and, for the text **under the cursor**,
   the active font, point size, and the **B I U** emphasis indicators. The
   **L C R J** group shows the current paragraph alignment.
-- **Ruler** — left/right margins (`L`/`R`) and tab stops (`!`).
-- **Status line** — typing mode (Insert/Overtype), page, line, and the vertical
-  and horizontal position in inches, exactly as WordStar reported them.
+- **Ruler** — left/right margins (`L`/`R`) and tab stops (`!`). Text wraps at
+  the right margin — column 65 unless you change it with `^OR` (stored in the
+  document as a `.rm` dot command).
+- **Flag column** — at the right edge: `<` ends a paragraph (a hard return),
+  `.` marks a dot-command line, `P` marks the first line of a new printed page,
+  and a blank means the line continues on the next row.
+- **Status line** — typing mode (Insert/Overtype), page, line on that page, and
+  the vertical and horizontal position in inches, as WordStar reported them.
+  Pages hold 54 printed lines; wrapped lines count as the rows they print on,
+  `.pa` starts a new page, and other dot commands don't print.
 
 ---
 
@@ -169,6 +176,8 @@ here, and the function keys are added for convenience.
 | `^W` / `^Z` | Scroll the view up / down one line |
 | `^Q` `^S` / `^Q` `^D` | Start / End of line   |
 | `^Q` `^R` / `^Q` `^C` | Start / End of document |
+| `^Q` `^I`   | Go to page                      |
+| `^Q` `^B` / `^Q` `^K` | Beginning / End of the marked block |
 | Arrows, Home, End, PgUp, PgDn | Modern equivalents |
 
 ### Editing
@@ -179,24 +188,34 @@ here, and the function keys are added for convenience.
 | `^N`  | Insert a line (cursor stays put) |
 | `^G`  | Delete the character at the cursor |
 | `^T`  | Delete the word                 |
-| `^Y`  | Delete the line                 |
+| `^Y`  | Delete the whole line           |
 | `^Q` `^Y` | Delete to end of line       |
 | `^Q` `Del` | Delete to start of line    |
 | `^U`  | Undo                            |
 
 ### Blocks
 
-Mark a block, then act on it. (Internally this uses a standard selection, so you
-can also shift-click style selections with the arrow keys.)
+Blocks work the WordStar way: press `^KB` at the start of the text, move to its
+end (the block highlights as you go), and press `^KK`. The block then stays
+marked where it is while you move the cursor anywhere else, ready to be copied
+or moved there.
 
 | Keys  | Action                          |
 | ----- | ------------------------------- |
 | `^KB` | Mark block beginning            |
-| `^KK` | Mark block end (copies it to the buffer) |
-| `^KC` | Copy block to the buffer        |
-| `^KV` | Paste the block at the cursor   |
-| `^KY` | Delete the block                |
-| `^KH` | Hide the block markers          |
+| `^KK` | Mark block end (also copies it to the block buffer) |
+| `^KC` | Copy the marked block to the cursor |
+| `^KV` | Move the marked block to the cursor — or, with no block marked, paste the block buffer |
+| `^KY` | Delete the block (it stays in the buffer, so `^KV` pastes it back) |
+| `^KH` | Hide / redisplay the block      |
+
+Bold, italic, and the other **Style** commands apply to the marked block too. A
+block that you edit after marking it is dropped rather than acted on, with a
+message asking you to mark it again.
+
+A selection made with the mouse (or still being marked, before `^KK`) acts like
+a clipboard selection instead: `^KC` copies it to the block buffer, `^KY` cuts
+it, and `^KV` pastes the buffer at the cursor.
 
 ### Find and replace
 
@@ -217,15 +236,19 @@ and **Esc** cancels.
 | `^PY` | Italic (`*…*`)                  |
 | `^PS` | Underline (`[…]{.underline}`)   |
 | `^PX` | Strikeout (`~~…~~`)             |
+| `^P=` | Font…                           |
 
 ### On-screen format (`^O`)
 
 | Keys  | Action                          |
 | ----- | ------------------------------- |
 | `^OD` | Hide / show the formatting markup (a clean reading view) |
+| `^OW` | Word wrap on / off              |
+| `^OR` | Set the right margin (the column text wraps at) |
 | `^OC` | Center the paragraph            |
-| `^OL` / `^OR` | Align left / right       |
+| `^OL` / `^O]` | Align left / right       |
 | `^OJ` | Justify                         |
+| `^OP` | Preview (same as F5)            |
 
 `^OD` is the modern equivalent of WordStar's "display control characters"
 toggle: it hides the Markdown markers and shows the text as it will read. It is a
@@ -238,6 +261,7 @@ read-only view — press `^OD` again (or `Esc`) to return to editing.
 | `^KS` / `F2`  | Save and keep editing   |
 | `^KD`         | Save and close the document (a fresh, untitled one takes its place) |
 | `^KX`         | Save and exit           |
+| `^KT`         | Save As                 |
 | `^KR`         | Insert another file at the cursor |
 | `^KP`         | Export to PDF           |
 | `^KQ` / `F10` | Quit (asks before discarding unsaved changes) |
@@ -260,7 +284,7 @@ terminal dies, the next time you open that document — or start without a file,
 for untitled work — WordStar-rs offers to restore it. The copy is removed once
 you save. Undo (`^U`) remembers the last 10,000 edits, and a Find-and-Replace
 counts as one.
-| `F3`          | Open the file browser   |
+| `F3` / `^OK`  | Open the file browser   |
 | `F5`          | Toggle the formatted preview |
 | `F1` / `^J`   | Help                    |
 | `F9`          | Open the menu bar       |
@@ -344,6 +368,7 @@ keyboard, never required.
 | Action            | What it does                       |
 | ----------------- | ---------------------------------- |
 | Click             | Position the cursor                |
+| Paste (terminal's paste, or Ctrl+Shift+V / Cmd+V in the browser) | Insert the text as one edit — plain Ctrl+V stays WordStar's `^V` |
 | Click and drag    | Mark a block (select text)         |
 | Double-click      | Select the word under the pointer  |
 | Click a menu title | Open that menu; click another to switch |

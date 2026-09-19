@@ -63,6 +63,8 @@ features = [
     "Element",
     "EventTarget",
     "KeyboardEvent",
+    "ClipboardEvent",
+    "DataTransfer",
     "MouseEvent",
     "FontFaceSet",
     "HtmlElement",

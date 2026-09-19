@@ -102,22 +102,24 @@ fn resolve_idle(state: &mut ChordState, key: KeyEvent) -> Resolution {
         'k' => {
             *state = ChordState::K;
             Resolution::Pending(
-                "^K  Block & files:  S)ave  X)exit  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y block",
+                "^K  Block & files:  S)ave  D)one  X)exit  T)save as  Q)uit  P)df  R)ead file  ?)count  B/K/C/V/Y/H block",
             )
         }
         'q' => {
             *state = ChordState::Q;
-            Resolution::Pending("^Q  Quick:  S/D line ends  R/C file ends  F)ind  A)replace")
+            Resolution::Pending(
+                "^Q  Quick:  S/D line ends  R/C file ends  I)page  B/K block ends  F)ind  A)replace  Y)del line end  M)calc",
+            )
         }
         'o' => {
             *state = ChordState::O;
             Resolution::Pending(
-                "^O  Onscreen:  D)isplay markup  W)ord wrap  C)enter  J)ustify  L)eft  R)ight",
+                "^O  Onscreen:  D)isplay markup  W)ord wrap  R)ight margin  C)enter  ])right  L)eft  J)ustify  P)review  K)open",
             )
         }
         'p' => {
             *state = ChordState::P;
-            Resolution::Pending("^P  Format:  B)old  Y)italic  S)underline  X)strikeout")
+            Resolution::Pending("^P  Format:  B)old  Y)italic  S)underline  X)strikeout  =)font")
         }
         // The movement "diamond".
         'e' => Resolution::Command(MoveUp),
@@ -153,6 +155,7 @@ fn resolve_k(key: KeyEvent) -> Resolution {
         Some('x') => Resolution::Command(SaveExit),
         Some('q') => Resolution::Command(Quit),
         Some('p') => Resolution::Command(ExportPdf),
+        Some('t') => Resolution::Command(SaveAs),
         Some('b') => Resolution::Command(BlockBegin),
         Some('k') => Resolution::Command(BlockEnd),
         Some('c') => Resolution::Command(BlockCopy),
@@ -181,6 +184,9 @@ fn resolve_q(key: KeyEvent) -> Resolution {
         Some('a') => Resolution::Command(Replace),
         Some('y') => Resolution::Command(DeleteToLineEnd),
         Some('m') => Resolution::Command(Calculator),
+        Some('i') => Resolution::Command(GoToPage),
+        Some('b') => Resolution::Command(GotoBlockBegin),
+        Some('k') => Resolution::Command(GotoBlockEnd),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }
@@ -194,7 +200,10 @@ fn resolve_o(key: KeyEvent) -> Resolution {
         Some('c') => Resolution::Command(AlignCenter),
         Some('j') => Resolution::Command(AlignJustify),
         Some('l') => Resolution::Command(AlignLeft),
-        Some('r') => Resolution::Command(AlignRight),
+        Some(']') => Resolution::Command(AlignRight),
+        Some('r') => Resolution::Command(RightMargin),
+        Some('p') => Resolution::Command(TogglePreview),
+        Some('k') => Resolution::Command(OpenBrowser),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }
@@ -207,6 +216,7 @@ fn resolve_p(key: KeyEvent) -> Resolution {
         Some('y') => Resolution::Command(InsertItalic),
         Some('s') => Resolution::Command(InsertUnderline),
         Some('x') => Resolution::Command(InsertStrike),
+        Some('=') => Resolution::Command(FontPrompt),
         _ if key.code == KeyCode::Esc => Resolution::PassThrough,
         _ => Resolution::Beep,
     }

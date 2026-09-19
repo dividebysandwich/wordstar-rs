@@ -33,15 +33,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     app.menu_bar_area.set(rows[1]);
 
+    // Lay the document out for this frame first: the ruler, the flag column, the
+    // status line and mouse hit-testing all read the same wrapped rows.
+    let text_area = text_column(rows[4], app);
+    app.refresh_layout(text_area.width as usize);
+
     title_bar(frame, rows[0], app);
     menu_bar(frame, rows[1], app);
     style_bar(frame, rows[2], app);
     ruler(frame, rows[3], app);
     if app.mode == Mode::Clean {
         app.editor_area.set(rows[4]);
+        app.editor_pane.set(rows[4]);
         clean_pane(frame, rows[4], app);
     } else {
-        editor_pane(frame, rows[4], app);
+        editor_pane(frame, rows[4], text_area, app);
     }
     status_bar(frame, rows[5], app);
 
@@ -65,21 +71,40 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
+/// Width reserved at the right of the editor pane: the flag column and the
+/// scrollbar (none on a pane too narrow to spare them).
+fn right_columns(area: Rect) -> u16 {
+    if area.width >= 3 { 2 } else { 0 }
+}
+
+/// The part of the editor pane the text is drawn in. With word wrap on, text
+/// wraps at the right margin (the ruler's `R`), like WordStar's fixed column;
+/// the rest of the pane stays blank. With wrap off it uses the full width.
+fn text_column(area: Rect, app: &App) -> Rect {
+    let avail = area.width - right_columns(area);
+    let width = if app.wrap {
+        avail.min(app.right_margin() as u16)
+    } else {
+        avail
+    };
+    Rect { width, ..area }
+}
+
 /// Render the editing canvas plus the WordStar right-border columns: a flag
-/// column (`<` = paragraph break, blank = soft word-wrap continuation) and a
-/// vertical scrollbar, both on a black background.
-fn editor_pane(frame: &mut Frame, area: Rect, app: &App) {
+/// column (`<` paragraph break, `.` dot command, `P` first line of a new page,
+/// blank for a soft word-wrap continuation) and a vertical scrollbar, both on a
+/// black background.
+fn editor_pane(frame: &mut Frame, area: Rect, text_area: Rect, app: &App) {
     // The text widget only styles cells it draws into, so paint the whole canvas
     // WordStar-blue first; otherwise empty space shows the terminal's default bg.
     frame.render_widget(Block::default().style(theme::canvas()), area);
 
-    // Reserve two right-hand columns: the flag column and the scrollbar.
-    let reserve: u16 = if area.width >= 3 { 2 } else { 0 };
-    let text_area = Rect {
+    let reserve = right_columns(area);
+    app.editor_area.set(text_area);
+    app.editor_pane.set(Rect {
         width: area.width - reserve,
         ..area
-    };
-    app.editor_area.set(text_area);
+    });
     frame.render_widget(&app.textarea, text_area);
 
     if reserve != 2 {
@@ -87,52 +112,90 @@ fn editor_pane(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let height = text_area.height as usize;
-    let (rows, top) = wrap_view(app, text_area);
+    let top = scroll_top(app, text_area);
+    block_overlay(frame, text_area, top, app);
+    let rows = app.visual_rows.borrow();
+    let pages = app.row_pages.borrow();
+    let lines = app.textarea.lines();
 
-    // Flag column (black background).
+    // Flag column (black background), at the far right like WordStar's.
     let flag_style = Style::default()
         .bg(ratatui::style::Color::Black)
         .fg(ratatui::style::Color::LightCyan);
     let flag_lines: Vec<Line> = (0..height)
         .map(|y| {
             let ch = match rows.get(top + y) {
+                Some(r) if crate::attributes::is_dot_command(&lines[r.line]) => '.',
+                Some(_) if matches!(pages.get(top + y), Some(&(p, 1)) if p > 1) => 'P',
                 Some(r) if r.last => '<', // hard return — paragraph break
                 _ => ' ',                 // soft wrap continuation or past EOF
             };
             Line::from(Span::styled(ch.to_string(), flag_style))
         })
         .collect();
+    let flag_x = area.x + area.width - reserve;
     frame.render_widget(
         Paragraph::new(flag_lines).style(flag_style),
-        Rect::new(area.x + text_area.width, area.y, 1, area.height),
+        Rect::new(flag_x, area.y, 1, area.height),
     );
 
     // Scrollbar column (black background).
     frame.render_widget(
         Paragraph::new(scrollbar_lines(rows.len(), top, height)),
-        Rect::new(area.x + text_area.width + 1, area.y, 1, area.height),
+        Rect::new(flag_x + 1, area.y, 1, area.height),
     );
 }
 
-/// The wrapped visual-row layout and the index of the first visible row.
+/// Highlight the marked block (`^KB` … `^KK`) over the rendered text. Unlike the
+/// widget's own selection, its ends stay put while the cursor moves elsewhere.
+fn block_overlay(frame: &mut Frame, text_area: Rect, top: usize, app: &App) {
+    let Some(block) = app.visible_block() else {
+        return;
+    };
+    let rows = app.visual_rows.borrow();
+    let lines = app.textarea.lines();
+    let tab = app.textarea.tab_length();
+    let style = theme::selection();
+    let buf = frame.buffer_mut();
+    for y in 0..text_area.height {
+        let Some(row) = rows.get(top + y as usize) else {
+            break;
+        };
+        if row.line < block.start.0 || row.line > block.end.0 {
+            continue;
+        }
+        let text = row.text(lines);
+        let len = text.chars().count();
+        let row_start = row.start_col(lines);
+        let from = if row.line == block.start.0 { block.start.1 } else { 0 };
+        let to = if row.line == block.end.0 { block.end.1 } else { usize::MAX };
+        let a = from.saturating_sub(row_start).min(len);
+        let b = to.saturating_sub(row_start).min(len);
+        if a >= b {
+            continue;
+        }
+        let offset = app.row_offset(text, text_area.width as usize);
+        let x0 = offset + crate::wrap::char_to_x(text, a, tab);
+        let x1 = (offset + crate::wrap::char_to_x(text, b, tab)).min(text_area.width as usize);
+        for x in x0..x1 {
+            buf[(text_area.x + x as u16, text_area.y + y)].set_style(style);
+        }
+    }
+}
+
+/// The index of the first visible visual row.
 ///
 /// `screen_cursor().row` is the cursor's *absolute* visual-row index (across the
 /// whole document), not viewport-relative, so it can't tell us the scroll offset
 /// on its own. The widget derives its viewport top with a stateful "keep the
 /// cursor in view" rule; we replicate it here, tracking the previous top in
 /// `app.scroll_top`, so the scrollbar thumb mirrors the textarea's real scroll.
-fn wrap_view(app: &App, text_area: Rect) -> (Vec<crate::wrap::VisualRow>, usize) {
-    let rows = crate::wrap::layout(
-        app.textarea.lines(),
-        app.textarea.wrap_mode(),
-        text_area.width as usize,
-        app.textarea.tab_length(),
-    );
+fn scroll_top(app: &App, text_area: Rect) -> usize {
     let cursor_row = app.textarea.screen_cursor().row;
     let height = text_area.height as usize;
     let top = next_scroll_top(app.scroll_top.get(), cursor_row, height);
     app.scroll_top.set(top);
-    (rows, top)
+    top
 }
 
 /// Mirror of `ratatui-textarea`'s internal viewport scroll rule: keep `cursor`
@@ -904,13 +967,15 @@ fn style_bar(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Default ruler geometry until layout/dot-command parsing lands.
-const RIGHT_MARGIN: usize = 65;
 const TAB_EVERY: usize = 5;
 
-fn ruler_char(col: usize, width: usize) -> char {
+/// The ruler glyph for 0-based screen column `col`: `L` on the first column,
+/// `R` on the last column text can occupy (column `margin`, 1-based), `!` tab
+/// stops, `-` elsewhere.
+fn ruler_char(col: usize, width: usize, margin: usize) -> char {
     if col == 0 {
         'L'
-    } else if col == RIGHT_MARGIN.min(width.saturating_sub(1)) {
+    } else if col + 1 == margin.min(width) {
         'R'
     } else if col.is_multiple_of(TAB_EVERY) {
         '!'
@@ -924,17 +989,12 @@ fn ruler(frame: &mut Frame, area: Rect, app: &App) {
     if width == 0 {
         return;
     }
-    let base: Vec<char> = (0..width).map(|c| ruler_char(c, width)).collect();
+    let margin = app.right_margin();
+    let base: Vec<char> = (0..width).map(|c| ruler_char(c, width, margin)).collect();
 
-    // Cursor position on the ruler, counted in printed columns (markers ignored).
-    let cursor = app.textarea.cursor();
-    let line = app
-        .textarea
-        .lines()
-        .get(cursor.0)
-        .map(String::as_str)
-        .unwrap_or("");
-    let indicator = crate::attributes::visible_column(line, cursor.1).min(width - 1);
+    // Cursor position on the ruler: the printed column within the cursor's
+    // visual row (markers ignored), so it tracks wrapped lines too.
+    let indicator = app.cursor_visible_column().min(width - 1);
 
     let style = theme::ruler();
     let mark = Style::default()
@@ -1201,6 +1261,114 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(app.textarea.cursor(), (0, 3));
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn mouse_click_lands_on_the_right_line_after_scrolling() {
+        let mut app = App::new(None).unwrap();
+        let text: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        app.textarea.insert_str(text.join("\n"));
+        // The cursor sits on the last line, so the view is scrolled to the end.
+        rendered(&app, 80, 24);
+        let top = app.scroll_top.get();
+        assert!(top > 0, "view should be scrolled");
+        // Click the first visible editor row (y = 4), column 5.
+        click(&mut app, 5, 4);
+        assert_eq!(app.textarea.cursor(), (top, 5));
+    }
+
+    #[test]
+    fn mouse_click_on_a_wrapped_row_hits_the_right_character() {
+        let mut app = App::new(None).unwrap();
+        // At width 40 the text column is 38 wide; this paragraph wraps once.
+        let para = "The quick brown fox jumps over the lazy dog again and again.";
+        app.textarea.insert_str(para);
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+        rendered(&app, 40, 12);
+        let second_row_start = {
+            let rows = app.visual_rows.borrow();
+            assert!(rows.len() >= 2, "paragraph should wrap");
+            rows[1].start_col(app.textarea.lines())
+        };
+        // Click the third character of the second visual row (y = 5).
+        click(&mut app, 2, 5);
+        assert_eq!(app.textarea.cursor(), (0, second_row_start + 2));
+    }
+
+    #[test]
+    fn text_wraps_at_the_right_margin_on_wide_screens() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("word ".repeat(40));
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        assert_eq!(app.editor_area.get().width, 65, "WordStar's default margin");
+        let buf = terminal.backend().buffer().clone();
+        // Nothing is drawn past the margin; the flag column is at the far right.
+        assert!((65..118).all(|x| buf[(x, 4)].symbol() == " "));
+        assert_eq!(buf[(118, 4)].symbol(), " ", "wrapped row has no flag");
+        assert_eq!(buf[(64, 3)].symbol(), "R", "ruler R on the 65th column");
+        assert_eq!(buf[(64, 4)].symbol(), " ", "last text column is inside it");
+    }
+
+    #[test]
+    fn flag_column_marks_dot_commands_and_new_pages() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("one\n.pa\ntwo");
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let flag = |y: u16| buf[(38, y)].symbol().to_string();
+        assert_eq!(flag(4), "<");
+        assert_eq!(flag(5), ".", "dot command");
+        assert_eq!(flag(6), "P", "first line of page 2");
+        assert_eq!(app.cursor_metrics().page, 1);
+        app.textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let m = app.cursor_metrics();
+        assert_eq!((m.page, m.line), (2, 1));
+    }
+
+    #[test]
+    fn status_column_counts_within_the_wrapped_row() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("word ".repeat(40)); // wraps at 65 columns
+        rendered(&app, 100, 10);
+        let m = app.cursor_metrics();
+        assert!(m.column <= 66, "column {} should be within the row", m.column);
+    }
+
+    #[test]
+    fn marked_block_stays_highlighted_after_the_cursor_moves_away() {
+        use ratatui_textarea::CursorMove;
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("alpha beta gamma");
+        app.textarea.move_cursor(CursorMove::Jump(0, 6));
+        app.block_begin();
+        app.textarea.move_cursor(CursorMove::Jump(0, 10));
+        app.block_end();
+        app.textarea.move_cursor(CursorMove::End);
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let sel = theme::selection();
+        assert_eq!(buf[(6, 4)].bg, sel.bg.unwrap(), "'b' of beta highlighted");
+        assert_eq!(buf[(9, 4)].bg, sel.bg.unwrap(), "'a' of beta highlighted");
+        assert_ne!(buf[(10, 4)].bg, sel.bg.unwrap(), "after the block");
+        assert_ne!(buf[(0, 4)].bg, sel.bg.unwrap(), "before the block");
     }
 
     #[test]

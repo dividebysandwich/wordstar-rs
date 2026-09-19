@@ -1,31 +1,89 @@
 //! Soft-wrap layout that mirrors `ratatui-textarea`'s internal wrapping.
 //!
-//! The widget computes word wrap privately, so to align the right-border flag
-//! column (paragraph vs. wrapped-line indicators) with the on-screen rows we
-//! reproduce the exact algorithm here. Keep this in sync with the pinned
-//! `ratatui-textarea` version.
+//! The widget computes word wrap privately, so to relate on-screen rows to the
+//! document — the flag column, mouse clicks, the marked-block highlight, and the
+//! page/line metrics on the status line — we reproduce the exact algorithm here.
+//! Keep this in sync with the pinned `ratatui-textarea` version.
 
 use ratatui_textarea::WrapMode;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 /// One on-screen (visual) row of a logical line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualRow {
+    /// Index of the logical line (document row) this visual row shows.
+    pub line: usize,
+    /// Byte range of the row's text within its logical line.
+    pub start: usize,
+    pub end: usize,
     /// True if this is the last visual row of its logical line (i.e. the line
     /// ends here with a hard return — a paragraph break).
     pub last: bool,
 }
 
+impl VisualRow {
+    /// The row's text within `lines`.
+    pub fn text<'a>(&self, lines: &'a [String]) -> &'a str {
+        lines
+            .get(self.line)
+            .and_then(|l| l.get(self.start..self.end))
+            .unwrap_or("")
+    }
+
+    /// The character column (within the logical line) where this row begins.
+    pub fn start_col(&self, lines: &[String]) -> usize {
+        lines
+            .get(self.line)
+            .and_then(|l| l.get(..self.start))
+            .map_or(0, |s| s.chars().count())
+    }
+}
+
 /// Compute the visual-row layout for `lines` at the given wrap `mode`/`width`.
 pub fn layout(lines: &[String], mode: WrapMode, width: usize, tab: u8) -> Vec<VisualRow> {
     let mut rows = Vec::new();
-    for line in lines.iter() {
-        let n = line_ranges(line, mode, width, tab).len();
-        for i in 0..n {
-            rows.push(VisualRow { last: i + 1 == n });
+    for (idx, line) in lines.iter().enumerate() {
+        let ranges = line_ranges(line, mode, width, tab);
+        let n = ranges.len();
+        for (i, (start, end)) in ranges.into_iter().enumerate() {
+            rows.push(VisualRow {
+                line: idx,
+                start,
+                end,
+                last: i + 1 == n,
+            });
         }
     }
     rows
+}
+
+/// The character offset within a row's `text` shown at display column `x` (a
+/// click on any cell of a wide character or tab lands on that character).
+pub fn x_to_char(text: &str, x: usize, tab: u8) -> usize {
+    let mut col = 0usize;
+    for (i, c) in text.chars().enumerate() {
+        let next = col + char_display_width(c, col, tab);
+        if x < next {
+            return i;
+        }
+        col = next;
+    }
+    text.chars().count()
+}
+
+/// The display column at which character `offset` of a row's `text` starts.
+pub fn char_to_x(text: &str, offset: usize, tab: u8) -> usize {
+    let mut col = 0usize;
+    for c in text.chars().take(offset) {
+        col += char_display_width(c, col, tab);
+    }
+    col
+}
+
+/// Display width of `c` when drawn at column `col` (tabs pad to the next stop).
+fn char_display_width(c: char, col: usize, tab: u8) -> usize {
+    display_width_from(c.encode_utf8(&mut [0; 4]), col, tab)
 }
 
 // --- The following is copied from ratatui-textarea's `wrap.rs` so our layout
@@ -199,6 +257,31 @@ mod tests {
         let rows = layout(&l, WrapMode::None, 10, 4);
         assert_eq!(rows.len(), 2);
         assert!(rows[0].last && rows[1].last);
+    }
+
+    #[test]
+    fn rows_carry_their_line_and_byte_range() {
+        let l = lines(&["alpha beta gamma", "x"]);
+        let rows = layout(&l, WrapMode::Word, 11, 4);
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[0].line, rows[0].text(&l)), (0, "alpha beta "));
+        assert_eq!((rows[1].line, rows[1].text(&l)), (0, "gamma"));
+        assert_eq!(rows[1].start_col(&l), 11);
+        assert_eq!((rows[2].line, rows[2].text(&l)), (1, "x"));
+    }
+
+    #[test]
+    fn columns_map_both_ways_with_wide_chars_and_tabs() {
+        // "a", a two-cell CJK character, then a tab to the next stop of 4.
+        let t = "a中\tb";
+        assert_eq!(char_to_x(t, 0, 4), 0);
+        assert_eq!(char_to_x(t, 1, 4), 1);
+        assert_eq!(char_to_x(t, 2, 4), 3);
+        assert_eq!(char_to_x(t, 3, 4), 4);
+        assert_eq!(x_to_char(t, 2, 4), 1, "second cell of the wide char");
+        assert_eq!(x_to_char(t, 3, 4), 2, "the tab cell");
+        assert_eq!(x_to_char(t, 4, 4), 3);
+        assert_eq!(x_to_char(t, 40, 4), 4, "past the end clamps");
     }
 
     #[test]

@@ -72,10 +72,10 @@ static FILE: &[MenuItem] = &[
     item("Save and Close", "^KD", Command::SaveClose),
     item("Save and Exit", "^KX", Command::SaveExit),
     SEP,
-    todo("Print...", "^KP", "Printing"),
-    item("Export PDF...", "", Command::ExportPdf),
+    todo("Print...", "", "Printing"),
+    item("Export PDF...", "^KP", Command::ExportPdf),
     SEP,
-    item("Exit WordStar", "^KQX / F10", Command::Quit),
+    item("Exit WordStar", "^KQ / F10", Command::Quit),
 ];
 
 static EDIT: &[MenuItem] = &[
@@ -91,6 +91,8 @@ static EDIT: &[MenuItem] = &[
     item("Find and Replace...", "^QA", Command::Replace),
     item("Next Find", "^L", Command::FindNext),
     item("Go to Page...", "^QI", Command::GoToPage),
+    item("Go to Block Begin", "^QB", Command::GotoBlockBegin),
+    item("Go to Block End", "^QK", Command::GotoBlockEnd),
 ];
 
 static VIEW: &[MenuItem] = &[
@@ -128,9 +130,11 @@ static HEADERS_FOOTERS: &[MenuItem] = &[
 
 static LAYOUT: &[MenuItem] = &[
     item("Center Line", "^OC", Command::AlignCenter),
-    item("Right Align Line", "^OJ", Command::AlignRight),
+    item("Right Align Line", "^O]", Command::AlignRight),
     item("Left Align Line", "^OL", Command::AlignLeft),
-    item("Justify", "^OS", Command::AlignJustify),
+    item("Justify", "^OJ", Command::AlignJustify),
+    SEP,
+    item("Right Margin...", "^OR", Command::RightMargin),
     SEP,
     sub("Headers/Footers", HEADERS_FOOTERS),
 ];
@@ -378,3 +382,50 @@ impl MenuState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::{KeyCode, KeyEvent, KeyModifiers};
+    use crate::keymap::{ChordState, Resolution, resolve};
+
+    /// Every `^…` shortcut printed in a menu must run that item's command, so the
+    /// labels can never drift from the real key bindings.
+    #[test]
+    fn menu_shortcuts_match_keymap() {
+        let mut checked = 0;
+        let submenus = MENUS.iter().flat_map(|m| m.items).filter_map(|it| match it.action {
+            MenuAction::Submenu(items) => Some(items),
+            _ => None,
+        });
+        for item in MENUS.iter().flat_map(|m| m.items).chain(submenus.flatten()) {
+            let MenuAction::Run(cmd) = &item.action else {
+                continue;
+            };
+            if matches!(cmd, Command::NotImplemented(_)) {
+                continue;
+            }
+            let chord = item.shortcut.split(" /").next().unwrap_or("").trim();
+            let Some(keys) = chord.strip_prefix('^') else {
+                continue;
+            };
+            let keys: Vec<char> = keys.chars().collect();
+            let mut state = ChordState::Idle;
+            let mut res = resolve(
+                &mut state,
+                KeyEvent::new(KeyCode::Char(keys[0].to_ascii_lowercase()), KeyModifiers::CONTROL),
+            );
+            if let Some(&second) = keys.get(1) {
+                res = resolve(&mut state, KeyEvent::new(KeyCode::Char(second), KeyModifiers::NONE));
+            }
+            assert_eq!(
+                res,
+                Resolution::Command(cmd.clone()),
+                "menu item {:?} is labeled {chord}",
+                item.label
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "only {checked} shortcuts checked");
+    }
+}

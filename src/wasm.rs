@@ -188,11 +188,33 @@ fn install_input_handlers(
         if event.code == ratzilla::event::KeyCode::Unidentified {
             return;
         }
+        // Leave the browser's paste shortcuts alone (plain Ctrl+V is WordStar's
+        // ^V), so it fires the `paste` event handled below.
+        let key = ev.key();
+        let paste_shortcut = (key.eq_ignore_ascii_case("v")
+            && (ev.meta_key() || (ev.ctrl_key() && ev.shift_key())))
+            || (key == "Insert" && ev.shift_key());
+        if paste_shortcut {
+            return;
+        }
         ev.prevent_default();
         key_app.borrow_mut().handle_key(event.into());
     });
     window.add_event_listener_with_callback("keydown", key_cb.as_ref().unchecked_ref())?;
     key_cb.forget();
+
+    // Paste (Ctrl+Shift+V, Shift+Insert, Cmd+V, or the browser's Edit menu).
+    let paste_app = app.clone();
+    let paste_cb = Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(
+        move |ev: web_sys::ClipboardEvent| {
+            if let Some(text) = ev.clipboard_data().and_then(|d| d.get_data("text/plain").ok()) {
+                ev.prevent_default();
+                paste_app.borrow_mut().handle_paste(text);
+            }
+        },
+    );
+    window.add_event_listener_with_callback("paste", paste_cb.as_ref().unchecked_ref())?;
+    paste_cb.forget();
 
     // Mouse. The pinned 10x20 cell makes pixel → grid mapping a plain division.
     use crate::input::{MouseButton, MouseEventKind};

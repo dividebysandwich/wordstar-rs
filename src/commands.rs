@@ -127,6 +127,11 @@ pub enum Command {
     Calculator,
     /// Jump to a page (prompt for a page number).
     GoToPage,
+    /// Set the right margin, the column text wraps at (^OR).
+    RightMargin,
+    /// Jump to the beginning / end of the marked block (^QB / ^QK).
+    GotoBlockBegin,
+    GotoBlockEnd,
 
     /// A menu entry kept for fidelity but not yet implemented; the payload names
     /// the feature for the status message.
@@ -185,10 +190,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         DeleteChar => app.edit(|t| t.delete_next_char()),
         DeleteCharBack => app.edit(|t| t.delete_char()),
         DeleteWord => app.edit(|t| t.delete_next_word()),
-        DeleteLine => app.edit(|t| {
-            t.move_cursor(CursorMove::Head);
-            t.delete_line_by_end() || t.delete_newline()
-        }),
+        DeleteLine => app.delete_line(),
         DeleteToLineEnd => app.edit(|t| t.delete_line_by_end()),
         DeleteToLineStart => app.edit(|t| t.delete_line_by_head()),
         InsertLine => app.insert_line(),
@@ -230,6 +232,9 @@ pub fn execute(app: &mut App, cmd: Command) {
         WordCount => app.show_word_count(),
         Calculator => app.start_calculator(),
         GoToPage => app.start_goto_page(),
+        RightMargin => app.start_right_margin(),
+        GotoBlockBegin => app.goto_block(false),
+        GotoBlockEnd => app.goto_block(true),
 
         NotImplemented(feature) => app.not_implemented(feature),
     }

@@ -35,13 +35,17 @@ fn main() -> Result<()> {
     {
         app.set_picker(picker);
     }
+    // Bracketed paste delivers a paste as one event (one undoable insertion)
+    // rather than as a stream of keystrokes.
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
-        ratatui::crossterm::event::EnableMouseCapture
+        ratatui::crossterm::event::EnableMouseCapture,
+        ratatui::crossterm::event::EnableBracketedPaste
     );
     let result = run(&mut terminal, app);
     let _ = ratatui::crossterm::execute!(
         std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste,
         ratatui::crossterm::event::DisableMouseCapture
     );
     ratatui::restore();

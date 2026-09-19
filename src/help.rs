@@ -47,17 +47,19 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^W / ^Z", "Scroll up / down one line");
     row(&mut out, "^QS / ^QD", "Start / End of line");
     row(&mut out, "^QR / ^QC", "Start / End of document");
+    row(&mut out, "^QB / ^QK", "Beginning / End of marked block");
     row(&mut out, "Arrows", "Modern cursor movement");
 
     head(&mut out, "Files & program");
     row(&mut out, "^KS  / F2", "Save");
     row(&mut out, "^KD", "Save and close the document");
     row(&mut out, "^KX", "Save and exit");
+    row(&mut out, "^KT", "Save As");
     row(&mut out, "^KR", "Insert another file at the cursor");
     row(&mut out, "^KP", "Export to PDF");
     row(&mut out, "^KQ  / F10", "Quit (asks to save changes)");
-    row(&mut out, "F3", "Open the file browser");
-    row(&mut out, "F5", "Toggle preview (graphical if supported)");
+    row(&mut out, "F3  / ^OK", "Open the file browser");
+    row(&mut out, "F5  / ^OP", "Toggle preview (graphical if supported)");
     row(&mut out, "F1  / ^J", "This help screen");
 
     head(&mut out, "Insert & utilities");
@@ -76,7 +78,7 @@ pub fn lines() -> Vec<Line<'static>> {
     row(&mut out, "^N", "Insert a line, cursor stays");
     row(&mut out, "^G", "Delete character at cursor");
     row(&mut out, "^T", "Delete word");
-    row(&mut out, "^Y", "Delete line");
+    row(&mut out, "^Y", "Delete the whole line");
     row(&mut out, "^QY", "Delete to end of line");
     row(&mut out, "^Q Del", "Delete to start of line");
     row(&mut out, "^U", "Undo");
@@ -88,23 +90,26 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Blocks");
     row(&mut out, "^KB", "Mark block start (then move cursor)");
-    row(&mut out, "^KK", "Mark block end");
-    row(&mut out, "^KC", "Copy block to clipboard");
-    row(&mut out, "^KY", "Cut block to clipboard");
-    row(&mut out, "^KV", "Paste block at cursor");
-    row(&mut out, "^KH", "Clear block markers");
+    row(&mut out, "^KK", "Mark block end (block stays marked)");
+    row(&mut out, "^KC", "Copy marked block to the cursor");
+    row(&mut out, "^KV", "Move marked block to the cursor");
+    row(&mut out, "", "(no block: paste the block buffer)");
+    row(&mut out, "^KY", "Delete block (kept in the buffer)");
+    row(&mut out, "^KH", "Hide / redisplay the block");
 
     head(&mut out, "Formatting (markdown)");
     row(&mut out, "^PB", "Bold  (**…**)");
     row(&mut out, "^PY", "Italic  (*…*)");
     row(&mut out, "^PS", "Underline  ([…]{.underline})");
     row(&mut out, "^PX", "Strikeout  (~~…~~)");
+    row(&mut out, "^P=", "Font…");
 
     head(&mut out, "Onscreen format (^O)");
     row(&mut out, "^OD", "Hide / show formatting markup");
     row(&mut out, "^OW", "Toggle word wrap");
+    row(&mut out, "^OR", "Right margin (wrap column)");
     row(&mut out, "^OC", "Center the paragraph");
-    row(&mut out, "^OL / ^OR", "Align left / right");
+    row(&mut out, "^OL / ^O]", "Align left / right");
     row(&mut out, "^OJ", "Justify");
 
     head(&mut out, "Mouse");
