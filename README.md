@@ -114,7 +114,7 @@ The same block holds a few options for the preview and the PDF:
 | Setting | Effect |
 | ------- | ------ |
 | `paragraphs: lines` | Type the WordStar way: every line you end with **Enter** is its own paragraph, and a Tab or spaces at its start are just an indent. Paragraphs are printed book-style, indented with no gap between them. (Without it, the file is standard Markdown: paragraphs are separated by a blank line, and an indented line after a blank one is a code block.) |
-| `smart: false` | Turn off typographic punctuation. By default `"quotes"` and `'apostrophes'` print curly, `--` and `---` become en and em dashes, and `...` an ellipsis. |
+| `smart: false` | Turn off typographic punctuation. By default `"quotes"` and `'apostrophes'` print curly, a typewriter `--` (or `---`) becomes an em dash (—), and `...` an ellipsis. |
 | `paper: letter` | Print on US Letter instead of A4 (`paper: a4`). |
 | `format: manuscript` | Export in standard manuscript format — see *Exporting to PDF*. |
 

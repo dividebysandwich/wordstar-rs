@@ -147,16 +147,49 @@ pub fn prepare_render_source(src: &str, opts: &RenderOptions) -> String {
             out.extend([String::new(), "* * *".to_string(), String::new()]);
             continue;
         }
-        let mut rewritten = String::with_capacity(line.len());
+        let text = if opts.smart && !trimmed.starts_with('|') && !is_thematic_break(trimmed) {
+            em_dashes(line)
+        } else {
+            line.to_string()
+        };
+        let mut rewritten = String::with_capacity(text.len());
         if opts.prose_paragraphs && !is_structural(line) {
-            rewrite_spans(trimmed, &mut rewritten);
+            rewrite_spans(text.trim_start(), &mut rewritten);
             out.extend([String::new(), rewritten, String::new()]);
         } else {
-            rewrite_spans(line, &mut rewritten);
+            rewrite_spans(&text, &mut rewritten);
             out.push(rewritten);
         }
     }
     out.join("\n")
+}
+
+/// Typewriter dashes: in a manuscript a double hyphen means an em dash, so turn
+/// `--` into `—` before smart punctuation would make it an en dash (`---` still
+/// becomes an em dash). Code spans are left alone.
+fn em_dashes(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut in_code = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            in_code = !in_code;
+        } else if c == '-' && !in_code {
+            let run = chars[i..].iter().take_while(|&&c| c == '-').count();
+            if run == 2 {
+                out.push('\u{2014}');
+            } else {
+                out.extend(std::iter::repeat_n('-', run));
+            }
+            i += run;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 /// True for a line that is Markdown structure rather than prose: blank, a
@@ -780,6 +813,17 @@ mod tests {
         assert!(!out.contains("\tSecond"), "indent would make a code block");
         assert!(out.contains("- a list"));
         assert!(out.contains("  code"), "fenced code left alone");
+    }
+
+    #[test]
+    fn double_hyphens_become_em_dashes_outside_code() {
+        let out = prepare("Wait -- no. Use `--flag` and a---b.");
+        assert_eq!(out, "Wait \u{2014} no. Use `--flag` and a---b.");
+        let plain = RenderOptions {
+            smart: false,
+            ..RenderOptions::default()
+        };
+        assert_eq!(prepare_render_source("a -- b", &plain), "a -- b");
     }
 
     #[test]

@@ -1126,7 +1126,7 @@ mod tests {
             panic!("expected a paragraph");
         };
         let text: String = segs.iter().map(|s| s.text.as_str()).collect();
-        assert_eq!(text, "\u{201C}Hello\u{201D} \u{2013} it\u{2019}s\u{2026} fine \u{2014} ok");
+        assert_eq!(text, "\u{201C}Hello\u{201D} \u{2014} it\u{2019}s\u{2026} fine \u{2014} ok");
         // All of these print in the PDF's WinAnsi encoding.
         assert_eq!(sanitize(&text), text);
     }
