@@ -235,12 +235,31 @@ read-only view — press `^OD` again (or `Esc`) to return to editing.
 
 | Keys          | Action                  |
 | ------------- | ----------------------- |
-| `^KS` / `F2`  | Save                    |
-| `^KD`         | Save and keep editing   |
+| `^KS` / `F2`  | Save and keep editing   |
+| `^KD`         | Save and close the document (a fresh, untitled one takes its place) |
 | `^KX`         | Save and exit           |
 | `^KR`         | Insert another file at the cursor |
 | `^KP`         | Export to PDF           |
 | `^KQ` / `F10` | Quit (asks before discarding unsaved changes) |
+
+Saving an untitled document opens **Save As** first, and whatever you were
+doing (closing, exiting, opening another file) carries on once it has a name. If
+a save fails, nothing is closed. **Close**, opening another file, and quitting
+all ask before discarding unsaved changes.
+
+### Backups and crash recovery
+
+Every save is written safely: the new text goes to a temporary file that
+replaces the document only once it is completely on disk, so a crash or a full
+disk can never leave a half-written manuscript. The previous version is kept
+next to it as a WordStar-style backup, `chapter1.md.bak`.
+
+While you have unsaved changes, a recovery copy is written every few seconds
+(to `~/.local/share/wordstar-rs/recovery/` on Linux). If the program or the
+terminal dies, the next time you open that document — or start without a file,
+for untitled work — WordStar-rs offers to restore it. The copy is removed once
+you save. Undo (`^U`) remembers the last 10,000 edits, and a Find-and-Replace
+counts as one.
 | `F3`          | Open the file browser   |
 | `F5`          | Toggle the formatted preview |
 | `F1` / `^J`   | Help                    |

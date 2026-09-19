@@ -24,6 +24,8 @@ fn main() -> Result<()> {
     let path = std::env::args().nth(1);
     let mut terminal = ratatui::init();
     let mut app = App::new(path)?;
+    // A crash or a closed terminal may have left autosaved work behind.
+    app.offer_recovery();
     // Detect terminal graphics support before enabling mouse capture, so the
     // protocol query/response isn't disturbed by mouse reports. The query blocks
     // up to ~2s waiting for a reply, so only run it on terminals that are likely
@@ -73,19 +75,28 @@ fn graphics_terminal_likely() -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn run(terminal: &mut DefaultTerminal, mut app: App) -> Result<()> {
+    use std::time::Duration;
+    let mut dirty = true;
     while !app.should_quit {
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        if dirty {
+            terminal.draw(|frame| ui::draw(frame, &app))?;
+            dirty = false;
+        }
 
         if app.preview_loading() {
             // Render the next slice of the graphical preview, redraw the progress
             // modal, and stay responsive to a cancel key without blocking.
             app.step_preview_job();
-            if event::poll(std::time::Duration::ZERO)? {
+            dirty = true;
+            if event::poll(Duration::ZERO)? {
                 dispatch(&mut app, event::read()?);
             }
-        } else {
+        } else if event::poll(Duration::from_millis(500))? {
             dispatch(&mut app, event::read()?);
+            dirty = true;
         }
+        // Wake up periodically even when idle, to keep the recovery copy fresh.
+        app.tick();
     }
     Ok(())
 }

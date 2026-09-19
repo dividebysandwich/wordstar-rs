@@ -6,7 +6,7 @@
 
 use ratatui_textarea::{CursorMove, Scrolling};
 
-use crate::app::{AlignChoice, App};
+use crate::app::{AfterSave, AlignChoice, App};
 
 /// A resolved editor action, independent of which key produced it.
 ///
@@ -18,8 +18,8 @@ pub enum Command {
     // --- file / app ---
     /// Save to the current path (markdown).
     Save,
-    /// Save and keep editing (WordStar ^KD); same as [`Command::Save`] for now.
-    SaveResume,
+    /// Save, then close the document (WordStar ^KD, "done").
+    SaveClose,
     /// Save then quit (WordStar ^KX).
     SaveExit,
     /// Quit, abandoning changes (WordStar ^KQ / F10).
@@ -36,7 +36,8 @@ pub enum Command {
     TogglePreview,
     /// Toggle word wrap (^OW).
     ToggleWrap,
-    /// Start a new, empty document.
+    /// Close the document and start a new, empty one (asks about unsaved
+    /// changes first).
     New,
     /// Export the document to a formatted PDF.
     ExportPdf,
@@ -136,12 +137,11 @@ pub enum Command {
 pub fn execute(app: &mut App, cmd: Command) {
     use Command::*;
     match cmd {
-        Save => app.save(),
-        SaveResume => app.save(),
-        SaveExit => {
+        Save => {
             app.save();
-            app.should_quit = true;
         }
+        SaveClose => app.save_then(AfterSave::Close),
+        SaveExit => app.save_then(AfterSave::Quit),
         Quit => app.request_quit(),
         Help => app.toggle_help(),
         Menu => app.open_menu(),
@@ -149,7 +149,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         SaveAs => app.start_save_as(),
         TogglePreview => app.toggle_preview(),
         ToggleWrap => app.toggle_wrap(),
-        New => app.new_document(),
+        New => app.guard_unsaved(AfterSave::Close),
         ExportPdf => app.start_export_pdf(),
         About => app.set_status("wordstar-rs — a WordStar 7 clone in Rust (ratatui)."),
 
@@ -194,7 +194,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         InsertLine => app.insert_line(),
 
         ToggleInsert => app.toggle_insert(),
-        Undo => app.edit(|t| t.undo()),
+        Undo => app.undo(),
         Redo => app.edit(|t| t.redo()),
 
         Find => app.start_find(),

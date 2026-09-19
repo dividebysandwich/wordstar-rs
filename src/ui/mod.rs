@@ -238,7 +238,7 @@ fn confirm_overlay(frame: &mut Frame, area: Rect, app: &App) {
     // Choices rendered as ASCII buttons, e.g. `[ Yes ]  [ No ]  [ Cancel ]`,
     // with the accelerator key highlighted.
     let buttons: &[(&str, &str)] = match c.action {
-        crate::app::ConfirmAction::SaveBeforeQuit => &[("Y", "es"), ("N", "o"), ("C", "ancel")],
+        crate::app::ConfirmAction::SaveBefore(_) => &[("Y", "es"), ("N", "o"), ("C", "ancel")],
         _ => &[("Y", "es"), ("N", "o")],
     };
     let button_line = Line::from(ascii_buttons(buttons));
@@ -1243,7 +1243,7 @@ mod tests {
         let mut app = App::new(None).unwrap();
         app.confirm = Some(ConfirmState {
             message: "Save changes before quitting?".into(),
-            action: ConfirmAction::SaveBeforeQuit,
+            action: ConfirmAction::SaveBefore(crate::app::AfterSave::Quit),
         });
         app.mode = Mode::Confirm;
         let screen = render_app(&app, 80, 16);

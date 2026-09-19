@@ -149,7 +149,7 @@ fn resolve_k(key: KeyEvent) -> Resolution {
     use Command::*;
     match letter(&key) {
         Some('s') => Resolution::Command(Save),
-        Some('d') => Resolution::Command(SaveResume),
+        Some('d') => Resolution::Command(SaveClose),
         Some('x') => Resolution::Command(SaveExit),
         Some('q') => Resolution::Command(Quit),
         Some('p') => Resolution::Command(ExportPdf),

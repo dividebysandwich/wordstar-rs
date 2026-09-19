@@ -51,11 +51,11 @@ pub fn lines() -> Vec<Line<'static>> {
 
     head(&mut out, "Files & program");
     row(&mut out, "^KS  / F2", "Save");
-    row(&mut out, "^KD", "Save and keep editing");
+    row(&mut out, "^KD", "Save and close the document");
     row(&mut out, "^KX", "Save and exit");
     row(&mut out, "^KR", "Insert another file at the cursor");
     row(&mut out, "^KP", "Export to PDF");
-    row(&mut out, "^KQ  / F10", "Quit (abandon changes)");
+    row(&mut out, "^KQ  / F10", "Quit (asks to save changes)");
     row(&mut out, "F3", "Open the file browser");
     row(&mut out, "F5", "Toggle preview (graphical if supported)");
     row(&mut out, "F1  / ^J", "This help screen");

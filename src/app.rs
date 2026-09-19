@@ -119,13 +119,34 @@ pub struct CalcState {
     pub result: String,
 }
 
+/// What to do once the document has been saved (or its changes deliberately
+/// discarded). Lets Save As, and the unsaved-changes prompt, finish the action
+/// that triggered them instead of dropping it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterSave {
+    /// Keep editing.
+    Nothing,
+    /// Exit the program.
+    Quit,
+    /// Close the document, leaving a fresh untitled one (WordStar `^KD`).
+    Close,
+    /// Replace the document with this file (the native file browser).
+    Open(PathBuf),
+    /// Replace the document with the file chosen in the host picker (browser).
+    ApplyPicked,
+}
+
 /// A pending action awaiting yes/no confirmation in [`Mode::Confirm`].
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     /// Overwrite an existing file with the exported PDF.
     OverwritePdf(PathBuf),
-    /// Quitting with unsaved changes: save / discard / cancel.
-    SaveBeforeQuit,
+    /// Save As onto a file that already exists.
+    OverwriteSave(PathBuf),
+    /// Unsaved changes before the given action: save / discard / cancel.
+    SaveBefore(AfterSave),
+    /// Restore this autosaved recovery text in place of the loaded document.
+    Recover(String),
 }
 
 /// Identifies a zoomed preview view: `(page, zoom×1000, offx×1000, offy×1000,
@@ -249,6 +270,22 @@ pub struct App {
     /// First visible visual row of the editor viewport, tracked across frames so
     /// the scrollbar thumb reflects the textarea's internal scroll position.
     pub scroll_top: Cell<usize>,
+    /// Action to finish once a pending Save As completes (e.g. quit after naming
+    /// an untitled document).
+    after_save: Option<AfterSave>,
+    /// A multi-step edit (replace-all) that `^U` should undo in one go: the
+    /// content hash right after it and how many widget undo steps it took.
+    compound_undo: Option<(u64, usize)>,
+    /// A file chosen in the host picker, held while the user decides what to do
+    /// with unsaved changes (browser only).
+    #[cfg(target_arch = "wasm32")]
+    pending_open: Option<(String, Vec<u8>)>,
+    /// When the crash-recovery copy was last considered, and the content hash
+    /// it was written for (native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    last_autosave_ms: f64,
+    #[cfg(not(target_arch = "wasm32"))]
+    autosave_hash: Option<u64>,
 }
 
 impl App {
@@ -322,6 +359,14 @@ impl App {
             sub_dropdown_area: Cell::new(Rect::ZERO),
             browser_list_area: Cell::new(Rect::ZERO),
             scroll_top: Cell::new(0),
+            after_save: None,
+            compound_undo: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_open: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_autosave_ms: 0.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            autosave_hash: None,
         };
         app.apply_editor_theme();
         if imported {
@@ -330,8 +375,10 @@ impl App {
         Ok(app)
     }
 
-    /// Apply the WordStar look to the text widget.
+    /// Apply the WordStar look to the text widget (and give it a deep undo
+    /// history; the widget's default remembers only 50 keystrokes).
     fn apply_editor_theme(&mut self) {
+        self.textarea.set_max_histories(UNDO_LEVELS);
         self.textarea.set_style(theme::canvas());
         // WordStar does not underline the current line; keep it plain.
         self.textarea.set_cursor_line_style(theme::canvas());
@@ -538,15 +585,48 @@ impl App {
         };
     }
 
-    /// Open the save-as prompt.
+    /// Open the save-as prompt, pre-filled with the current file name (relative
+    /// names are saved next to the current document).
     pub fn start_save_as(&mut self) {
+        let current = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.mode = Mode::Prompt;
         self.prompt = PromptState {
             kind: PromptKind::SaveAs,
             label: "Save as:".into(),
-            input: String::new(),
+            input: current,
             pending_find: None,
         };
+    }
+
+    /// Turn a typed Save As name into a path: `~/` expands to the home folder, a
+    /// missing extension becomes `.md`, and a relative name lands in the current
+    /// document's folder.
+    fn resolve_save_path(&self, name: &str) -> PathBuf {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut path = match (name.strip_prefix("~/"), dirs::home_dir()) {
+            (Some(rest), Some(home)) => home.join(rest),
+            _ => PathBuf::from(name),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let mut path = PathBuf::from(name);
+        if path.extension().is_none() {
+            path.set_extension("md");
+        }
+        if path.is_relative()
+            && let Some(dir) = self
+                .path
+                .as_ref()
+                .and_then(|p| p.parent())
+                .filter(|d| !d.as_os_str().is_empty())
+        {
+            path = dir.join(path);
+        }
+        path
     }
 
     /// Open the font-name prompt.
@@ -575,6 +655,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.mode = Mode::Editor;
+                self.after_save = None;
                 self.set_status("Cancelled.");
             }
             KeyCode::Enter => self.confirm_prompt(),
@@ -597,10 +678,19 @@ impl App {
                 let name = self.prompt.input.trim().to_string();
                 self.mode = Mode::Editor;
                 if name.is_empty() {
+                    self.after_save = None;
                     self.set_status("Save cancelled (no name).");
+                    return;
+                }
+                let path = self.resolve_save_path(&name);
+                if path.exists() && self.path.as_ref() != Some(&path) {
+                    self.confirm = Some(ConfirmState {
+                        message: format!("{} already exists. Overwrite?", path.display()),
+                        action: ConfirmAction::OverwriteSave(path),
+                    });
+                    self.mode = Mode::Confirm;
                 } else {
-                    self.path = Some(PathBuf::from(name));
-                    self.save();
+                    self.save_as(path);
                 }
             }
             PromptKind::Font => {
@@ -708,9 +798,11 @@ impl App {
         }
     }
 
-    /// Replace every occurrence of `find` with `with`, rebuilding the buffer.
+    /// Replace every occurrence of `find` with `with`.
     ///
-    /// Note: this resets undo history (acceptable for the MVP).
+    /// Only the span between the first and last change is rewritten, as a single
+    /// selection edit, so the cursor, search and undo history survive and one
+    /// `^U` restores the original text.
     fn replace_all(&mut self, find: &str, with: &str) {
         let text = self.textarea.lines().join("\n");
         let count = text.matches(find).count();
@@ -719,15 +811,52 @@ impl App {
             return;
         }
         let replaced = text.replace(find, with);
-        let lines: Vec<String> = if replaced.is_empty() {
-            vec![String::new()]
-        } else {
-            replaced.split('\n').map(str::to_owned).collect()
-        };
-        self.textarea = TextArea::new(lines);
-        self.apply_editor_theme();
+        let old: Vec<char> = text.chars().collect();
+        let new: Vec<char> = replaced.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let middle: String = new[prefix..new.len() - suffix].iter().collect();
+        let start = char_pos(&old, prefix);
+        let end = char_pos(&old, old.len() - suffix);
+
+        let cursor = self.textarea.cursor();
+        self.clear_marking();
+        self.textarea.move_cursor(jump(start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(end));
+        // An empty selection or an empty insertion adds no undo step of its own.
+        let steps = usize::from(start != end) + usize::from(!middle.is_empty());
+        self.textarea.insert_str(middle);
+        self.textarea.move_cursor(jump((cursor.0, cursor.1)));
+        self.compound_undo = Some((self.content_hash(), steps));
         self.modified = true;
-        self.set_status(format!("Replaced {count} occurrence(s)."));
+        self.set_status(format!("Replaced {count} occurrence(s) — ^U undoes."));
+    }
+
+    /// `^U` — undo the last edit, treating a replace-all as a single edit.
+    pub fn undo(&mut self) {
+        let steps = match self.compound_undo.take() {
+            Some((hash, steps)) if hash == self.content_hash() => steps,
+            _ => 1,
+        };
+        for _ in 0..steps {
+            if self.textarea.undo() {
+                self.modified = true;
+            }
+        }
+    }
+
+    /// A hash of the buffer's text, for cheap "has anything changed?" checks.
+    fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.textarea.lines().hash(&mut hasher);
+        hasher.finish()
     }
 
     // ------------------------------------------------------------------
@@ -784,7 +913,7 @@ impl App {
                 crate::browser::Activation::Open(path) => {
                     self.browser = None;
                     self.mode = Mode::Editor;
-                    self.load_file(path);
+                    self.guard_unsaved(AfterSave::Open(path));
                 }
             },
             _ => {}
@@ -824,18 +953,21 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     fn load_file(&mut self, path: PathBuf) {
         match crate::wordstar::load(&path) {
-            Ok(loaded) => self.apply_loaded(loaded, path),
+            Ok(loaded) => {
+                self.apply_loaded(loaded, path);
+                self.offer_recovery();
+            }
             Err(e) => self.set_status(format!("Open failed: {e}")),
         }
     }
 
-    /// If the user has chosen a file via the host picker, load it. Called once
-    /// per frame from the browser render loop.
+    /// If the user has chosen a file via the host picker, load it (asking first
+    /// about unsaved changes). Called once per frame from the browser render loop.
     #[cfg(target_arch = "wasm32")]
     pub fn poll_pending_open(&mut self) {
-        if let Some((name, bytes)) = crate::platform::take_open() {
-            let loaded = crate::wordstar::load_bytes(&name, &bytes);
-            self.apply_loaded(loaded, PathBuf::from(name));
+        if let Some(file) = crate::platform::take_open() {
+            self.pending_open = Some(file);
+            self.guard_unsaved(AfterSave::ApplyPicked);
         }
     }
 
@@ -1617,34 +1749,177 @@ impl App {
         (font.unwrap_or_else(|| "Default".into()), size.unwrap_or(12))
     }
 
-    /// Save the buffer to its path as markdown.
-    pub fn save(&mut self) {
-        let Some(path) = self.path.clone() else {
-            self.set_status("No file name yet — Save As arrives in Phase 2.");
-            return;
-        };
+    /// Save the buffer to its path as markdown, returning whether it was written.
+    /// An untitled document opens the Save As prompt instead.
+    pub fn save(&mut self) -> bool {
+        match self.path.clone() {
+            Some(path) => self.write_document(&path),
+            None => {
+                self.start_save_as();
+                false
+            }
+        }
+    }
+
+    /// Save, then carry out `after` — once Save As has named the document, if it
+    /// is untitled. Nothing happens after a failed save, so no work is lost.
+    pub fn save_then(&mut self, after: AfterSave) {
+        if self.path.is_none() {
+            self.after_save = Some(after);
+            self.start_save_as();
+        } else if self.save() {
+            self.run_after(after);
+        }
+    }
+
+    /// Write the document to `path` under that name (Save As), then finish any
+    /// action that was waiting for the save.
+    fn save_as(&mut self, path: PathBuf) {
+        if self.write_document(&path) {
+            self.path = Some(path);
+            if let Some(after) = self.after_save.take() {
+                self.run_after(after);
+            }
+        } else {
+            self.after_save = None;
+        }
+    }
+
+    /// Write the buffer to `path`, reporting the outcome on the status line.
+    fn write_document(&mut self, path: &Path) -> bool {
         let mut content = self.textarea.lines().join("\n");
         content.push('\n');
         #[cfg(not(target_arch = "wasm32"))]
-        match fs::write(&path, content) {
+        match crate::platform::write_file_safely(path, content.as_bytes()) {
             Ok(()) => {
+                crate::platform::clear_recovery(self.path.as_deref());
+                crate::platform::clear_recovery(Some(path));
+                self.autosave_hash = None;
                 self.modified = false;
                 self.set_status(format!("Saved {}", path.display()));
+                true
             }
-            Err(e) => self.set_status(format!("Save failed: {e}")),
+            Err(e) => {
+                self.set_status(format!("Save failed: {e}"));
+                ring_bell();
+                false
+            }
         }
         // In the browser there is no filesystem: hand the bytes to the host as a
         // download named after the document.
         #[cfg(target_arch = "wasm32")]
         {
-            let name = file_download_name(&path, "md");
+            let name = file_download_name(path, "md");
             match crate::platform::download(&name, "text/markdown", content.as_bytes()) {
                 Ok(()) => {
                     self.modified = false;
                     self.set_status(format!("Downloaded {name}"));
+                    true
                 }
-                Err(e) => self.set_status(e),
+                Err(e) => {
+                    self.set_status(e);
+                    false
+                }
             }
+        }
+    }
+
+    /// Carry out `after` now; unsaved changes are either saved already or being
+    /// deliberately discarded.
+    fn run_after(&mut self, after: AfterSave) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if after != AfterSave::Nothing {
+            crate::platform::clear_recovery(self.path.as_deref());
+        }
+        match after {
+            AfterSave::Nothing => {}
+            AfterSave::Quit => self.should_quit = true,
+            AfterSave::Close => self.new_document(),
+            AfterSave::Open(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.load_file(path);
+                #[cfg(target_arch = "wasm32")]
+                let _ = path;
+            }
+            AfterSave::ApplyPicked => {
+                #[cfg(target_arch = "wasm32")]
+                if let Some((name, bytes)) = self.pending_open.take() {
+                    let loaded = crate::wordstar::load_bytes(&name, &bytes);
+                    self.apply_loaded(loaded, PathBuf::from(name));
+                }
+            }
+        }
+    }
+
+    /// Run `after`, first asking whether to save if there are unsaved changes.
+    pub fn guard_unsaved(&mut self, after: AfterSave) {
+        if !self.modified {
+            self.run_after(after);
+            return;
+        }
+        let before = match after {
+            AfterSave::Quit => "quitting",
+            AfterSave::Close => "closing",
+            AfterSave::Open(_) | AfterSave::ApplyPicked => "opening another file",
+            AfterSave::Nothing => "continuing",
+        };
+        self.confirm = Some(ConfirmState {
+            message: format!("Save changes to {} before {before}?", self.file_name()),
+            action: ConfirmAction::SaveBefore(after),
+        });
+        self.mode = Mode::Confirm;
+    }
+
+    /// Offer to restore an autosaved copy of the current document left behind by
+    /// a crash or a closed terminal, if it is newer than the file on disk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn offer_recovery(&mut self) {
+        let Some((text, written)) = crate::platform::load_recovery(self.path.as_deref()) else {
+            return;
+        };
+        let current = self.textarea.lines().join("\n");
+        let on_disk_is_newer = self
+            .path
+            .as_ref()
+            .and_then(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+            .is_some_and(|disk| disk >= written);
+        if text.trim_end_matches('\n') == current.trim_end_matches('\n') || on_disk_is_newer {
+            crate::platform::clear_recovery(self.path.as_deref());
+            return;
+        }
+        let minutes = written.elapsed().map(|d| d.as_secs() / 60).unwrap_or(0);
+        let age = match minutes {
+            0 => "less than a minute ago".to_string(),
+            1..=119 => format!("{minutes} min ago"),
+            _ => format!("{} h ago", minutes / 60),
+        };
+        self.confirm = Some(ConfirmState {
+            message: format!("Recover unsaved changes to {} from {age}?", self.file_name()),
+            action: ConfirmAction::Recover(text),
+        });
+        self.mode = Mode::Confirm;
+    }
+
+    /// Periodic housekeeping from the native main loop: keep a crash-recovery
+    /// copy of unsaved work, rewritten at most every few seconds when it changed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn tick(&mut self) {
+        const AUTOSAVE_INTERVAL_MS: f64 = 15_000.0;
+        if !self.modified {
+            return;
+        }
+        let now = crate::platform::now_ms();
+        if now - self.last_autosave_ms < AUTOSAVE_INTERVAL_MS {
+            return;
+        }
+        self.last_autosave_ms = now;
+        let hash = self.content_hash();
+        if self.autosave_hash == Some(hash) {
+            return;
+        }
+        let text = self.textarea.lines().join("\n");
+        if crate::platform::save_recovery(self.path.as_deref(), &text).is_ok() {
+            self.autosave_hash = Some(hash);
         }
     }
 
@@ -1684,65 +1959,75 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) {
-        // The quit prompt is three-way (Save / Don't save / Cancel).
-        if matches!(
-            self.confirm.as_ref().map(|c| &c.action),
-            Some(ConfirmAction::SaveBeforeQuit)
-        ) {
+        // The unsaved-changes prompt is three-way (Save / Don't save / Cancel).
+        if let Some(ConfirmAction::SaveBefore(_)) = self.confirm.as_ref().map(|c| &c.action) {
+            let take_after = |app: &mut App| match app.confirm.take().map(|c| c.action) {
+                Some(ConfirmAction::SaveBefore(after)) => after,
+                _ => AfterSave::Nothing,
+            };
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    self.confirm = None;
+                    let after = take_after(self);
                     self.mode = Mode::Editor;
-                    self.save();
-                    // Quit only if the save actually succeeded (e.g. an untitled
-                    // document still needs a name; then we stay so nothing is lost).
-                    if !self.modified {
-                        self.should_quit = true;
-                    }
+                    // Continues only once the save succeeds (an untitled document
+                    // goes through Save As first), so nothing is lost.
+                    self.save_then(after);
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.confirm = None;
-                    self.should_quit = true; // discard changes and quit
+                    let after = take_after(self);
+                    self.mode = Mode::Editor;
+                    self.run_after(after); // discard the changes
                 }
                 KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => {
                     self.confirm = None;
                     self.mode = Mode::Editor;
-                    self.set_status("Quit cancelled.");
+                    self.set_status("Cancelled — your changes are still here.");
                 }
                 _ => {}
             }
             return;
         }
 
-        // Generic yes/no confirmations (e.g. PDF overwrite).
+        // Generic yes/no confirmations (overwrite, recovery).
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 let action = self.confirm.take().map(|c| c.action);
                 self.mode = Mode::Editor;
-                if let Some(ConfirmAction::OverwritePdf(path)) = action {
-                    self.do_export_pdf(&path);
+                match action {
+                    Some(ConfirmAction::OverwritePdf(path)) => self.do_export_pdf(&path),
+                    Some(ConfirmAction::OverwriteSave(path)) => self.save_as(path),
+                    Some(ConfirmAction::Recover(text)) => self.restore_recovered(&text),
+                    _ => {}
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                self.confirm = None;
+                let action = self.confirm.take().map(|c| c.action);
                 self.mode = Mode::Editor;
-                self.set_status("Cancelled.");
+                self.after_save = None;
+                match action {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    Some(ConfirmAction::Recover(_)) => {
+                        crate::platform::clear_recovery(self.path.as_deref());
+                        self.set_status("Recovery copy discarded.");
+                    }
+                    _ => self.set_status("Cancelled."),
+                }
             }
             _ => {}
         }
     }
 
+    /// Replace the buffer with recovered text, leaving it unsaved.
+    fn restore_recovered(&mut self, text: &str) {
+        self.textarea = TextArea::new(text_to_lines(text));
+        self.apply_editor_theme();
+        self.modified = true;
+        self.set_status("Recovered your unsaved changes — save (^KS) to keep them.");
+    }
+
     /// Quit, prompting to save first if there are unsaved changes.
     pub fn request_quit(&mut self) {
-        if self.modified {
-            self.confirm = Some(ConfirmState {
-                message: format!("Save changes to {} before quitting?", self.file_name()),
-                action: ConfirmAction::SaveBeforeQuit,
-            });
-            self.mode = Mode::Confirm;
-        } else {
-            self.should_quit = true;
-        }
+        self.guard_unsaved(AfterSave::Quit);
     }
 
     /// Insert pasted text.
@@ -1938,7 +2223,7 @@ impl App {
                     if let Some(crate::browser::Activation::Open(path)) = activation {
                         self.browser = None;
                         self.mode = Mode::Editor;
-                        self.load_file(path);
+                        self.guard_unsaved(AfterSave::Open(path));
                     }
                 }
             }
@@ -2102,6 +2387,32 @@ enum OverlayKind {
 /// Approximate text lines per printed page (9" at 6 lines/inch), used for the
 /// status-line page metric and "go to page".
 const LINES_PER_PAGE: usize = 54;
+
+/// The `(row, col)` of character `offset` in `chars`, a buffer joined with `\n`.
+fn char_pos(chars: &[char], offset: usize) -> (usize, usize) {
+    let (mut row, mut col) = (0, 0);
+    for &c in &chars[..offset] {
+        if c == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
+}
+
+/// A cursor jump to `(row, col)`, saturating at the widget's `u16` coordinates.
+fn jump((row, col): (usize, usize)) -> CursorMove {
+    CursorMove::Jump(
+        row.min(u16::MAX as usize) as u16,
+        col.min(u16::MAX as usize) as u16,
+    )
+}
+
+/// Undo steps the editor remembers (the text widget defaults to only 50, and
+/// every typed character is one step).
+const UNDO_LEVELS: usize = 10_000;
 
 /// Split loaded document text into editor lines (never empty).
 fn text_to_lines(text: &str) -> Vec<String> {
@@ -2364,6 +2675,160 @@ mod tests {
             Activation::Run(Command::Header) => {}
             other => panic!("expected Header command, got {other:?}"),
         }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    /// A fresh, empty scratch directory for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("wsrs-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_exit_on_untitled_asks_for_a_name_instead_of_quitting() {
+        let dir = scratch("save-exit");
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("precious words");
+        app.modified = true;
+        commands::execute(&mut app, commands::Command::SaveExit);
+        assert!(!app.should_quit, "must not quit with the work unsaved");
+        assert_eq!(app.mode, Mode::Prompt);
+        assert_eq!(app.prompt.kind, PromptKind::SaveAs);
+
+        // Naming the file saves it (adding .md), then finishes the exit.
+        let target = dir.join("story");
+        app.prompt.input = target.to_string_lossy().into_owned();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("story.md")).unwrap(),
+            "precious words\n"
+        );
+        assert!(app.should_quit);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancelled_save_as_forgets_the_pending_exit() {
+        let mut app = App::new(None).unwrap();
+        app.modified = true;
+        commands::execute(&mut app, commands::Command::SaveExit);
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Editor);
+        assert!(!app.should_quit);
+        assert!(app.after_save.is_none());
+    }
+
+    #[test]
+    fn failed_save_does_not_quit() {
+        let mut app = App::new(None).unwrap();
+        app.path = Some(PathBuf::from("/nonexistent-dir-wsrs/story.md"));
+        app.modified = true;
+        commands::execute(&mut app, commands::Command::SaveExit);
+        assert!(!app.should_quit);
+        assert!(app.modified);
+        assert!(app.status_msg.as_deref().unwrap().contains("Save failed"));
+    }
+
+    #[test]
+    fn close_with_unsaved_changes_asks_first() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("draft");
+        app.modified = true;
+        commands::execute(&mut app, commands::Command::New);
+        assert_eq!(app.mode, Mode::Confirm);
+        assert_eq!(app.textarea.lines(), ["draft"], "nothing discarded yet");
+
+        // Cancel keeps everything.
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(app.mode, Mode::Editor);
+        assert_eq!(app.textarea.lines(), ["draft"]);
+
+        // "No" discards and closes.
+        commands::execute(&mut app, commands::Command::New);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.textarea.lines(), [""]);
+        assert!(!app.modified);
+    }
+
+    #[test]
+    fn save_as_onto_an_existing_file_asks_to_overwrite() {
+        let dir = scratch("overwrite");
+        let other = dir.join("other.md");
+        std::fs::write(&other, "someone else's chapter\n").unwrap();
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("mine");
+        app.start_save_as();
+        app.prompt.input = other.to_string_lossy().into_owned();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Confirm);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "someone else's chapter\n");
+        assert!(app.path.is_none(), "path only changes after a successful save");
+
+        app.start_save_as();
+        app.prompt.input = other.to_string_lossy().into_owned();
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "mine\n");
+        assert_eq!(app.path.as_deref(), Some(other.as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_as_resolves_relative_names_next_to_the_document() {
+        let mut app = App::new(None).unwrap();
+        app.path = Some(PathBuf::from("/novel/drafts/ch1.md"));
+        assert_eq!(
+            app.resolve_save_path("ch2"),
+            PathBuf::from("/novel/drafts/ch2.md")
+        );
+        assert_eq!(app.resolve_save_path("/tmp/x.txt"), PathBuf::from("/tmp/x.txt"));
+        app.start_save_as();
+        assert_eq!(app.prompt.input, "ch1.md", "pre-filled with the current name");
+    }
+
+    #[test]
+    fn undo_reaches_far_beyond_fifty_keystrokes() {
+        let mut app = App::new(None).unwrap();
+        let text = "x".repeat(300);
+        type_str(&mut app, &text);
+        for _ in 0..300 {
+            commands::execute(&mut app, commands::Command::Undo);
+        }
+        assert_eq!(app.textarea.lines(), [""]);
+    }
+
+    #[test]
+    fn replace_all_is_undone_by_a_single_undo() {
+        let mut app = App::new(None).unwrap();
+        app.textarea.insert_str("Ann met Anne.\nAnn left.");
+        app.textarea.move_cursor(CursorMove::Jump(1, 3));
+        app.replace_all("Ann", "Beth");
+        assert_eq!(app.textarea.lines(), ["Beth met Bethe.", "Beth left."]);
+        assert_eq!(app.textarea.cursor(), (1, 3), "cursor stays put");
+        commands::execute(&mut app, commands::Command::Undo);
+        assert_eq!(app.textarea.lines(), ["Ann met Anne.", "Ann left."]);
+    }
+
+    #[test]
+    fn replace_with_nothing_is_undone_by_a_single_undo() {
+        let mut app = App::new(None).unwrap();
+        type_str(&mut app, "ab");
+        app.replace_all("b", "");
+        assert_eq!(app.textarea.lines(), ["a"]);
+        commands::execute(&mut app, commands::Command::Undo);
+        assert_eq!(app.textarea.lines(), ["ab"], "one undo, not two");
     }
 
     #[test]
