@@ -12,6 +12,7 @@ pub mod attributes;
 pub mod book;
 pub mod calc;
 pub mod commands;
+pub mod docx;
 pub mod gfx;
 pub mod help;
 pub mod input;

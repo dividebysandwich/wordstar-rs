@@ -75,6 +75,7 @@ static FILE: &[MenuItem] = &[
     SEP,
     todo("Print...", "", "Printing"),
     item("Export PDF...", "^KP", Command::ExportPdf),
+    item("Export Word (.docx)...", "", Command::ExportDocx),
     SEP,
     item("Exit WordStar", "^KQ / F10", Command::Quit),
 ];

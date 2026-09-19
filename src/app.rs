@@ -160,8 +160,8 @@ pub enum AfterSave {
 /// A pending action awaiting yes/no confirmation in [`Mode::Confirm`].
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    /// Overwrite an existing file with the exported PDF.
-    OverwritePdf(PathBuf),
+    /// Overwrite an existing file with the export (PDF or Word).
+    OverwriteExport(PathBuf),
     /// Save As onto a file that already exists.
     OverwriteSave(PathBuf),
     /// Unsaved changes before the given action: save / discard / cancel.
@@ -1122,11 +1122,11 @@ impl App {
                 if path.exists() {
                     self.confirm = Some(ConfirmState {
                         message: format!("{} already exists. Overwrite?", path.display()),
-                        action: ConfirmAction::OverwritePdf(path),
+                        action: ConfirmAction::OverwriteExport(path),
                     });
                     self.mode = Mode::Confirm;
                 } else {
-                    self.do_export_pdf(&path);
+                    self.do_export(&path);
                 }
             }
             PromptKind::FontSize => {
@@ -3550,18 +3550,30 @@ impl App {
     }
 
     /// Open the "Export PDF as:" filename prompt, pre-filled with a default.
+    /// (Typing a `.docx` name there exports a Word document instead.)
     pub fn start_export_pdf(&mut self) {
+        self.start_export("pdf");
+    }
+
+    /// File ▸ Export Word Document: the export prompt with a `.docx` name.
+    pub fn start_export_docx(&mut self) {
+        self.start_export("docx");
+    }
+
+    fn start_export(&mut self, extension: &str) {
         let default = match &self.path {
-            Some(p) => p.with_extension("pdf"),
-            None => PathBuf::from("untitled.pdf"),
+            Some(p) => p.with_extension(extension),
+            None => PathBuf::from(format!("untitled.{extension}")),
         };
+        let word = extension == "docx";
         let manuscript = crate::attributes::render_options(&self.textarea.lines().join("\n"))
             .manuscript
             .is_some();
-        let label = if manuscript {
-            "Export manuscript PDF as:"
-        } else {
-            "Export PDF as:"
+        let label = match (manuscript, word) {
+            (true, true) => "Export manuscript .docx as:",
+            (true, false) => "Export manuscript PDF as:",
+            (false, true) => "Export Word document as:",
+            (false, false) => "Export PDF as:",
         };
         self.open_prompt(PromptKind::ExportPdf, label, default.to_string_lossy().into_owned());
     }
@@ -3574,10 +3586,18 @@ impl App {
         }
     }
 
-    fn do_export_pdf(&mut self, path: &Path) {
+    /// Export to `path`: a Word document if it ends in `.docx`, else a PDF.
+    fn do_export(&mut self, path: &Path) {
         let title = self.file_name();
         let book = self.book_text();
-        let bytes = crate::pdf::export(&book.text, &title);
+        let word = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("docx"));
+        let bytes = if word {
+            crate::docx::export(&book.text, &title)
+        } else {
+            crate::pdf::export(&book.text, &title)
+        };
         #[cfg(not(target_arch = "wasm32"))]
         match fs::write(path, bytes) {
             Ok(()) if !book.missing.is_empty() => self.set_status(format!(
@@ -3586,12 +3606,17 @@ impl App {
                 book.missing.join(", ")
             )),
             Ok(()) => self.set_status(format!("Exported {}", path.display())),
-            Err(e) => self.set_status(format!("PDF export failed: {e}")),
+            Err(e) => self.set_status(format!("Export failed: {e}")),
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let name = file_download_name(path, "pdf");
-            match crate::platform::download(&name, "application/pdf", &bytes) {
+            let (ext, mime) = if word {
+                ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            } else {
+                ("pdf", "application/pdf")
+            };
+            let name = file_download_name(path, ext);
+            match crate::platform::download(&name, mime, &bytes) {
                 Ok(()) => self.set_status(format!("Downloaded {name}")),
                 Err(e) => self.set_status(e),
             }
@@ -3634,7 +3659,7 @@ impl App {
                 let action = self.confirm.take().map(|c| c.action);
                 self.mode = Mode::Editor;
                 match action {
-                    Some(ConfirmAction::OverwritePdf(path)) => self.do_export_pdf(&path),
+                    Some(ConfirmAction::OverwriteExport(path)) => self.do_export(&path),
                     Some(ConfirmAction::OverwriteSave(path)) => self.save_as(path),
                     Some(ConfirmAction::Recover(text)) => self.restore_recovered(&text),
                     Some(ConfirmAction::OverwriteBlock(path, text)) => self.write_block(&path, &text),
@@ -5140,6 +5165,23 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.path.as_deref(), Some(dir.join("ch2.md").as_path()));
         assert_eq!(app.textarea.lines(), ["# Two", "Morning came."]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_writes_word_for_a_docx_name() {
+        let dir = scratch("export");
+        let mut app = App::new(None).unwrap();
+        app.path = Some(dir.join("story.md"));
+        app.textarea.insert_str("# Title\nOnce upon a time.");
+        commands::execute(&mut app, commands::Command::ExportDocx);
+        assert_eq!(app.prompt.input, dir.join("story.docx").to_string_lossy());
+        app.handle_key(key(KeyCode::Enter));
+        let bytes = std::fs::read(dir.join("story.docx")).unwrap();
+        assert!(bytes.starts_with(b"PK"), "a zip package");
+        commands::execute(&mut app, commands::Command::ExportPdf);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(std::fs::read(dir.join("story.pdf")).unwrap().starts_with(b"%PDF"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

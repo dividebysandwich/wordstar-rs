@@ -41,6 +41,8 @@ pub enum Command {
     New,
     /// Export the document to a formatted PDF.
     ExportPdf,
+    /// Export the document as a Word file (.docx).
+    ExportDocx,
     /// Show the About message.
     About,
 
@@ -181,6 +183,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         ToggleWrap => app.toggle_wrap(),
         New => app.guard_unsaved(AfterSave::Close),
         ExportPdf => app.start_export_pdf(),
+        ExportDocx => app.start_export_docx(),
         About => app.set_status("wordstar-rs — a WordStar 7 clone in Rust (ratatui)."),
 
         MoveUp => app.textarea.move_cursor(CursorMove::Up),

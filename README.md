@@ -416,7 +416,7 @@ it. Items that open a **submenu** are marked with a `▶`; press **→** (or cli
 to open it and **←** to step back.
 
 - **File** — Open/Switch…, Recent Files…, Close, Save, Save As…, Save and
-  Close, Save and Exit, Export PDF…, Exit WordStar
+  Close, Save and Exit, Export PDF…, Export Word (.docx)…, Exit WordStar
 - **Edit** — Undo · mark/copy/move/delete a block · Find…, Find and Replace…,
   Next Find, Go to Page…
 - **View** — Preview · Command Tags (show/hide markup), Block Highlighting,
@@ -465,6 +465,8 @@ that Hunspell dictionary if it's installed (as on most Linux systems). The
 frontmatter, dot commands, code, links and web addresses are never checked.
 (The built-in dictionary is the SCOWL-based en_US Hunspell dictionary; see
 `assets/dict/LICENSE-en_US.txt` for its license.)
+
+---
 
 ## The file browser
 
@@ -521,6 +523,19 @@ with WordStar's manuscript heritage, and one that needs no bundled fonts. Text
 is limited to the Latin-1 / Windows-1252 character set (which includes curly
 quotes and dashes); anything outside it is shown as `?`.
 
+### Word documents
+
+Agents, editors and publishers usually want a Word file. **File → Export Word
+(.docx)** — or typing a name ending in `.docx` at the `^KP` prompt — writes one
+from the same document: real paragraph styles (Normal, Heading 1–4, Quote,
+Code) so it stays easy to edit, bold/italic/underline/strikethrough, lists,
+tables, page breaks, and headers and footers with live page numbers. The body
+font is the frontmatter's `font:` (Times New Roman if unset), on A4 or
+`paper: letter`. With `format: manuscript` the Word file follows standard
+manuscript format just like the PDF — Courier New 12 pt, double-spaced, indented
+paragraphs, the contact block and word count on page one, and the
+`Surname / TITLE / page` header on the pages after it.
+
 ### Standard manuscript format
 
 Magazines, agents and publishers ask for fiction in *standard manuscript
@@ -541,7 +556,8 @@ paragraphs: lines
 ---
 ```
 
-`^KP` then exports the manuscript the way editors expect it: 12-point Courier,
+`^KP` then exports the manuscript (as a PDF, or a `.docx` — see above) the
+way editors expect it: 12-point Courier,
 double-spaced, one-inch margins, and every paragraph indented half an inch with
 no blank lines between them. Page one has your name and contact details in the
 top left, the word count rounded to the nearest hundred ("about 4,300 words")

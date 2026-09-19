@@ -1792,7 +1792,7 @@ mod tests {
         let mut app = App::new(None).unwrap();
         app.confirm = Some(ConfirmState {
             message: "out.pdf already exists. Overwrite?".into(),
-            action: ConfirmAction::OverwritePdf(std::path::PathBuf::from("out.pdf")),
+            action: ConfirmAction::OverwriteExport(std::path::PathBuf::from("out.pdf")),
         });
         app.mode = Mode::Confirm;
         let screen = render_app(&app, 80, 16);
