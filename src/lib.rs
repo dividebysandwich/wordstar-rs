@@ -23,6 +23,8 @@ pub mod platform;
 pub mod preview;
 pub mod spell;
 pub mod theme;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod thesaurus;
 pub mod track;
 pub mod ui;
 pub mod wordstar;

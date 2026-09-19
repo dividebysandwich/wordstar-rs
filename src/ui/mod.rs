@@ -72,6 +72,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::ReplaceAsk => {}
         Mode::Outline => outline_overlay(frame, area, app),
         Mode::Recent => recent_overlay(frame, area, app),
+        Mode::Thesaurus => {
+            if let Some(t) = app.synonyms.as_ref() {
+                let title = format!(" Thesaurus: {} ", t.word);
+                list_overlay(frame, area, app, &title, &t.items, t.selected);
+            }
+        }
         Mode::Spell => spell_overlay(frame, rows[4], app),
     }
 }

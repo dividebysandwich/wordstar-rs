@@ -67,6 +67,8 @@ pub enum Mode {
     Spell,
     /// File ▸ Recent Files.
     Recent,
+    /// The thesaurus's list of alternatives for a word.
+    Thesaurus,
 }
 
 /// Which kind of single-line prompt is active.
@@ -373,6 +375,18 @@ pub struct RecentState {
     pub selected: usize,
 }
 
+/// State backing the thesaurus list ([`Mode::Thesaurus`]).
+#[derive(Debug, Clone, Default)]
+pub struct ThesaurusState {
+    /// The word looked up, and where it is.
+    pub word: String,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    /// Alternatives, each with its part of speech and relation.
+    pub items: Vec<(String, String)>,
+    pub selected: usize,
+}
+
 /// What a key or click did in a pick-list (Go to Heading, Recent Files).
 enum ListAction {
     Stay,
@@ -466,6 +480,11 @@ pub struct App {
     pub outline: Option<OutlineState>,
     /// File ▸ Recent Files (present when `mode == Recent`).
     pub recent: Option<RecentState>,
+    /// The thesaurus list (present when `mode == Thesaurus`).
+    pub synonyms: Option<ThesaurusState>,
+    /// The installed thesaurus, looked for on first use.
+    #[cfg(not(target_arch = "wasm32"))]
+    thesaurus: std::cell::OnceCell<Option<crate::thesaurus::Thesaurus>>,
     /// The spelling dictionary, loaded on first use (or why it couldn't be).
     speller: std::cell::OnceCell<Result<crate::spell::Speller, String>>,
     /// Underline misspelled words as you write (View menu).
@@ -611,6 +630,9 @@ impl App {
             calc: None,
             outline: None,
             recent: None,
+            synonyms: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            thesaurus: std::cell::OnceCell::new(),
             speller: std::cell::OnceCell::new(),
             spell_highlight: true,
             spell: None,
@@ -749,6 +771,7 @@ impl App {
             Mode::Outline => self.handle_outline_key(key),
             Mode::Spell => self.handle_spell_key(key),
             Mode::Recent => self.handle_recent_key(key),
+            Mode::Thesaurus => self.handle_thesaurus_key(key),
         }
     }
 
@@ -2091,6 +2114,7 @@ impl App {
         let end = offset_to_pos(lines, new_off + len);
         self.textarea.move_cursor(jump(start));
         self.modified = true;
+        self.group_undo(2);
         self.marked = Some(MarkedBlock { start, end, ..block });
         self.set_status("Block moved to the cursor.");
     }
@@ -2179,6 +2203,26 @@ impl App {
         self.textarea.start_selection();
         self.textarea.move_cursor(jump(b.end));
         true
+    }
+
+    /// Replace the text from `start` to `end` with `text`, as a single step for
+    /// `^U` (the widget records a deletion and an insertion).
+    fn replace_range(&mut self, start: (usize, usize), end: (usize, usize), text: &str) {
+        self.textarea.cancel_selection();
+        self.textarea.move_cursor(jump(start));
+        self.textarea.start_selection();
+        self.textarea.move_cursor(jump(end));
+        let steps = usize::from(start != end) + usize::from(!text.is_empty());
+        self.textarea.insert_str(text);
+        self.modified = true;
+        self.group_undo(steps);
+    }
+
+    /// Make the last `steps` widget edits undo together with one `^U`.
+    fn group_undo(&mut self, steps: usize) {
+        if steps > 1 {
+            self.compound_undo = Some((self.content_hash(), steps));
+        }
     }
 
     /// Delete the text between two positions as one undoable edit.
@@ -2408,12 +2452,7 @@ impl App {
 
     /// Replace the unknown word with `with` and carry on.
     fn spell_replace(&mut self, session: &SpellSession, with: &str) {
-        self.textarea.cancel_selection();
-        self.textarea.move_cursor(jump(session.start));
-        self.textarea.start_selection();
-        self.textarea.move_cursor(jump(session.end));
-        self.textarea.insert_str(with);
-        self.modified = true;
+        self.replace_range(session.start, session.end, with);
         let after = self.cursor_pos();
         self.spell_continue(session, after, session.corrected + 1);
     }
@@ -2557,7 +2596,90 @@ impl App {
     fn close_lists(&mut self) {
         self.outline = None;
         self.recent = None;
+        self.synonyms = None;
         self.mode = Mode::Editor;
+    }
+
+    /// `^QJ` — the thesaurus: alternatives for the word at the cursor, to swap
+    /// one in.
+    pub fn start_thesaurus(&mut self) {
+        let (row, col) = self.cursor_pos();
+        let line = self.textarea.lines()[row].clone();
+        let Some((s, e)) = crate::spell::word_at(&line, col) else {
+            return self.set_status("Put the cursor on a word to look it up.");
+        };
+        let word: String = line.chars().skip(s).take(e - s).collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let language = crate::attributes::frontmatter_value(self.textarea.lines(), "language")
+                .map(|l| l.replace('-', "_"))
+                .unwrap_or_else(|| "en_US".into());
+            let Some(thesaurus) = self
+                .thesaurus
+                .get_or_init(|| crate::thesaurus::Thesaurus::find(&language))
+            else {
+                return self.set_status(
+                    "No thesaurus installed — LibreOffice or a mythes-en package provides one.",
+                );
+            };
+            let items: Vec<(String, String)> = thesaurus
+                .lookup(&word)
+                .into_iter()
+                .flat_map(|m| {
+                    m.words.into_iter().map(move |(w, note)| {
+                        let detail = match note {
+                            Some(n) => format!("{} · {n}", m.part),
+                            None => m.part.clone(),
+                        };
+                        (w, detail)
+                    })
+                })
+                .collect();
+            if items.is_empty() {
+                return self.set_status(format!("No alternatives for \u{201C}{word}\u{201D}."));
+            }
+            self.synonyms = Some(ThesaurusState {
+                word,
+                start: (row, s),
+                end: (row, e),
+                items,
+                selected: 0,
+            });
+            self.mode = Mode::Thesaurus;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = word;
+            self.set_status("The thesaurus isn't available in the browser.");
+        }
+    }
+
+    fn handle_thesaurus_key(&mut self, key: KeyEvent) {
+        let Some(t) = self.synonyms.as_mut() else {
+            self.mode = Mode::Editor;
+            return;
+        };
+        match list_key(&mut t.selected, t.items.len(), &key) {
+            ListAction::Stay => {}
+            ListAction::Choose => self.thesaurus_replace(),
+            ListAction::Close => self.close_lists(),
+        }
+    }
+
+    /// Put the chosen alternative in place of the word, in the same case.
+    fn thesaurus_replace(&mut self) {
+        let Some(t) = self.synonyms.take() else {
+            return;
+        };
+        self.mode = Mode::Editor;
+        let Some((choice, _)) = t.items.get(t.selected) else {
+            return;
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let choice = crate::thesaurus::match_case(&t.word, choice);
+        self.clear_marking();
+        self.replace_range(t.start, t.end, &choice);
+        self.set_status(format!("\u{201C}{}\u{201D} → \u{201C}{choice}\u{201D}.", t.word));
     }
 
     /// File ▸ Recent Files: the documents edited lately, to reopen where you
@@ -2773,12 +2895,7 @@ impl App {
         };
         self.marking = false;
         if changed != text {
-            self.textarea.cancel_selection();
-            self.textarea.move_cursor(jump(start));
-            self.textarea.start_selection();
-            self.textarea.move_cursor(jump(end));
-            self.textarea.insert_str(&changed);
-            self.modified = true;
+            self.replace_range(start, end, &changed);
         }
         let end = self.cursor_pos();
         self.textarea.cancel_selection();
@@ -2878,6 +2995,8 @@ impl App {
                 format!("{lead}{open}{core}{close}{trail}")
             };
             self.textarea.insert_str(wrapped);
+            // The cut and the insertion undo together.
+            self.group_undo(1 + usize::from(!inner.is_empty()));
             self.set_status(format!("{label} applied to selection."));
         } else {
             self.textarea.insert_str(format!("{open}{close}"));
@@ -2895,8 +3014,10 @@ impl App {
             self.textarea.cut();
             let inner = self.textarea.yank_text();
             let cleaned = crate::attributes::strip_inline_markers(&inner);
+            let steps = usize::from(!inner.is_empty()) + usize::from(!cleaned.is_empty());
             self.textarea.insert_str(cleaned);
             self.modified = true;
+            self.group_undo(steps);
             self.set_status("Formatting cleared from selection.");
         } else {
             self.set_status("Select text first, then clear formatting.");
@@ -3758,7 +3879,7 @@ impl App {
                     self.mode = Mode::Editor;
                 }
             }
-            Mode::Outline | Mode::Recent => self.mouse_list(me),
+            Mode::Outline | Mode::Recent | Mode::Thesaurus => self.mouse_list(me),
             Mode::Spell => {}
             Mode::Prompt
             | Mode::Confirm
@@ -4003,6 +4124,10 @@ impl App {
                 Some(o) => (&mut o.selected, o.items.len()),
                 None => return,
             },
+            Mode::Thesaurus => match self.synonyms.as_mut() {
+                Some(t) => (&mut t.selected, t.items.len()),
+                None => return,
+            },
             _ => match self.recent.as_mut() {
                 Some(r) => (&mut r.selected, r.items.len()),
                 None => return,
@@ -4026,10 +4151,10 @@ impl App {
                 let idx = first + (me.row - area.y) as usize;
                 if idx <= last {
                     *selected = idx;
-                    if self.mode == Mode::Outline {
-                        self.outline_jump();
-                    } else {
-                        self.recent_open();
+                    match self.mode {
+                        Mode::Outline => self.outline_jump(),
+                        Mode::Thesaurus => self.thesaurus_replace(),
+                        _ => self.recent_open(),
                     }
                 }
             }
@@ -5182,6 +5307,47 @@ mod tests {
         commands::execute(&mut app, commands::Command::ExportPdf);
         app.handle_key(key(KeyCode::Enter));
         assert!(std::fs::read(dir.join("story.pdf")).unwrap().starts_with(b"%PDF"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn block_edits_undo_in_one_step() {
+        // Bold on a block.
+        let mut app = marked_quick();
+        chord(&mut app, 'p', 'b');
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+        // Case change.
+        let mut app = marked_quick();
+        chord(&mut app, 'k', '"');
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+        // Moving a block.
+        let mut app = marked_quick();
+        app.textarea.move_cursor(CursorMove::End);
+        chord(&mut app, 'k', 'v');
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["The quick brown fox."]);
+    }
+
+    #[test]
+    fn thesaurus_swaps_in_an_alternative_in_the_same_case() {
+        let dir = scratch("thesaurus");
+        let dat = "UTF-8\nhappy|1\n(adj)|glad|content (related term)\n";
+        std::fs::write(dir.join("th.dat"), dat).unwrap();
+        std::fs::write(dir.join("th.idx"), "UTF-8\n1\nhappy|6\n").unwrap();
+        let mut app = App::new(None).unwrap();
+        let _ = app.thesaurus.set(crate::thesaurus::Thesaurus::open(&dir.join("th.dat")));
+        app.textarea.insert_str("Happy days.");
+        app.textarea.move_cursor(CursorMove::Jump(0, 2));
+        chord(&mut app, 'q', 'j');
+        assert_eq!(app.mode, Mode::Thesaurus);
+        let items = &app.synonyms.as_ref().unwrap().items;
+        assert_eq!(items[1], ("content".to_string(), "adj · related term".to_string()));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.textarea.lines(), ["Glad days."]);
+        app.handle_key(ctrl('u'));
+        assert_eq!(app.textarea.lines(), ["Happy days."], "one undo");
         std::fs::remove_dir_all(&dir).ok();
     }
 

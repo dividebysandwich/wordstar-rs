@@ -98,6 +98,7 @@ pub fn lines() -> Vec<Line<'static>> {
     head(&mut out, "Spelling");
     row(&mut out, "^QL", "Check spelling from the cursor");
     row(&mut out, "^QN", "Check the word at the cursor");
+    row(&mut out, "^QJ", "Thesaurus for the word at the cursor");
     row(&mut out, "", "1-9 suggestion · I ignore · G ignore all");
     row(&mut out, "", "A add to your dictionary · T type · Esc");
 

@@ -429,9 +429,9 @@ to open it and **←** to step back.
 - **Utilities** — Word Count · Spelling Check, Thesaurus, Calculator, Sort Block
 - **Help** — Help Topics, About
 
-A few WordStar features that have no equivalent here yet (printing, the
-thesaurus, block sort) appear in the menus for familiarity but report that they
-are not implemented when chosen.
+A few WordStar features that have no equivalent here yet (printing, block
+sort) appear in the menus for familiarity but report that they are not
+implemented when chosen.
 
 ---
 
@@ -465,6 +465,15 @@ that Hunspell dictionary if it's installed (as on most Linux systems). The
 frontmatter, dot commands, code, links and web addresses are never checked.
 (The built-in dictionary is the SCOWL-based en_US Hunspell dictionary; see
 `assets/dict/LICENSE-en_US.txt` for its license.)
+
+### Thesaurus
+
+`^QJ` looks up the word at the cursor and lists alternatives by meaning — with
+related words and antonyms marked; pick one and press **Enter** to swap it in
+(in the same capitalisation; `^U` swaps back). The thesaurus is the MyThes one
+LibreOffice uses: it's found automatically if LibreOffice is installed, or your
+system's `mythes-en` package; set `WORDSTAR_THESAURUS` to the path of a
+`th_*.dat` file to use another. (Not available in the browser version.)
 
 ---
 

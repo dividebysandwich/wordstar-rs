@@ -143,6 +143,8 @@ pub enum Command {
     /// Set / go to place marker 0–9 (^K0–^K9 / ^Q0–^Q9).
     SetMarker(usize),
     GotoMarker(usize),
+    /// Alternatives for the word at the cursor (^QJ).
+    Thesaurus,
     /// List recently edited documents to reopen (File menu).
     RecentFiles,
     /// List the headings (chapters) to jump to (^QG).
@@ -280,6 +282,7 @@ pub fn execute(app: &mut App, cmd: Command) {
         GotoMarker(n) => app.goto_marker(n),
         GotoHeading => app.open_outline(),
         RecentFiles => app.open_recent(),
+        Thesaurus => app.start_thesaurus(),
         SpellCheck => app.start_spell_check(),
         SpellWord => app.spell_check_word(),
         ToggleSpellHighlight => app.toggle_spell_highlight(),

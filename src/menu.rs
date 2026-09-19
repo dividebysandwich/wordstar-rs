@@ -158,7 +158,7 @@ static UTILITIES: &[MenuItem] = &[
     SEP,
     item("Spelling Check", "^QL", Command::SpellCheck),
     item("Check Word", "^QN", Command::SpellWord),
-    todo("Thesaurus...", "^QJ", "Thesaurus"),
+    item("Thesaurus...", "^QJ", Command::Thesaurus),
     item("Calculator", "^QM", Command::Calculator),
     todo("Sort Block", "", "Sort block"),
 ];
